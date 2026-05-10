@@ -54,9 +54,6 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "--target x86_64-apple-darwin --bundles dmg"
-            rust-target: x86_64-apple-darwin
-          - platform: macos-latest
             args: ""
             rust-target: ""
           - platform: ubuntu-latest
