@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { ClipboardEvent as ReactClipboardEvent, CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink } from "lucide-react";
+import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink, Copy } from "lucide-react";
 import { AddScriptsDialog } from "./components/AddScriptsDialog";
 import { ConnectionSettings } from "./components/ConnectionSettings";
 import { Modal } from "./components/Modal";
@@ -21,7 +21,7 @@ import {
   drainScriptEvents
 } from "./lib/backend";
 import { createId, nowIso } from "./lib/ids";
-import type { AppData, AttachedScript, GlobalScript, LogEntry, ScriptExecutionEvent, WorkspaceTab } from "./lib/types";
+import type { AppData, AttachedScript, GlobalScript, LogEntry, LogLevel, ScriptExecutionEvent, WorkspaceTab } from "./lib/types";
 
 type ModalState =
   | { kind: "none" }
@@ -37,12 +37,112 @@ type RunningExecution = {
   scriptName: string;
 };
 
+const LOG_LEVELS: LogLevel[] = ["info", "warn", "error", "stdout", "stderr"];
+
+function createDefaultLogLevelFilter(): Record<LogLevel, boolean> {
+  return {
+    info: true,
+    warn: true,
+    error: true,
+    stdout: true,
+    stderr: true
+  };
+}
+
+function filterLogsByLevel(logs: LogEntry[], filter: Record<LogLevel, boolean>) {
+  return logs.filter((log) => filter[log.level]);
+}
+
 export function App() {
   const params = new globalThis.URLSearchParams(window.location.search);
   if (params.get("view") === "script-log") {
     return <ScriptLogWindow params={params} />;
   }
   return <MainApp />;
+}
+
+function logsToClipboardText(logs: LogEntry[]) {
+  return logs.map((log) => log.message).join("\n");
+}
+
+function copySelectedLogs(event: ReactClipboardEvent<HTMLDivElement>) {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return;
+  }
+
+  const text = getSelectedLogMessageText(event.currentTarget, selection).trimEnd();
+  if (!text) {
+    return;
+  }
+
+  event.preventDefault();
+  event.clipboardData.setData("text/plain", text);
+}
+
+function getSelectedLogMessageText(container: HTMLElement, selection: globalThis.Selection) {
+  const selectedLines: string[] = [];
+  const messageNodes = Array.from(container.querySelectorAll<HTMLElement>("[data-log-message]"));
+
+  for (const messageNode of messageNodes) {
+    const selectedText = getSelectedTextFromNode(messageNode, selection);
+    if (selectedText) {
+      selectedLines.push(selectedText);
+    }
+  }
+
+  return selectedLines.join("\n");
+}
+
+function getSelectedTextFromNode(node: HTMLElement, selection: globalThis.Selection) {
+  const selectedParts: string[] = [];
+  const nodeRange = document.createRange();
+  nodeRange.selectNodeContents(node);
+
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const selectionRange = selection.getRangeAt(index);
+    if (!selectionRange.intersectsNode(node)) {
+      continue;
+    }
+
+    const intersection = selectionRange.cloneRange();
+    if (intersection.compareBoundaryPoints(globalThis.Range.START_TO_START, nodeRange) < 0) {
+      intersection.setStart(nodeRange.startContainer, nodeRange.startOffset);
+    }
+    if (intersection.compareBoundaryPoints(globalThis.Range.END_TO_END, nodeRange) > 0) {
+      intersection.setEnd(nodeRange.endContainer, nodeRange.endOffset);
+    }
+    selectedParts.push(intersection.toString());
+  }
+
+  nodeRange.detach();
+  return selectedParts.join("");
+}
+
+async function copyTextToClipboard(text: string) {
+  const value = text.trimEnd();
+  if (!value) {
+    return;
+  }
+
+  if (globalThis.navigator.clipboard?.writeText) {
+    await globalThis.navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error("Clipboard API is unavailable.");
+  }
 }
 
 function MainApp() {
@@ -54,6 +154,7 @@ function MainApp() {
   const [busy, setBusy] = useState(false);
   const [logsPanelHeight, setLogsPanelHeight] = useState(260);
   const [logsAutoscroll, setLogsAutoscroll] = useState(true);
+  const [logLevelFilter, setLogLevelFilter] = useState<Record<LogLevel, boolean>>(createDefaultLogLevelFilter);
   const [runtimePath, setRuntimePath] = useState("");
   const [systemLogPath, setSystemLogPath] = useState("");
   const mainPaneRef = useRef<HTMLElement | null>(null);
@@ -136,6 +237,7 @@ function MainApp() {
     () => data.workspaces.find((workspace) => workspace.id === data.activeTabId) ?? data.workspaces[0],
     [data.activeTabId, data.workspaces]
   );
+  const visibleLogs = useMemo(() => filterLogsByLevel(activeWorkspace?.logs ?? [], logLevelFilter), [activeWorkspace?.logs, logLevelFilter]);
   const latestLogId = activeWorkspace?.logs.at(-1)?.id;
 
   useEffect(() => {
@@ -170,9 +272,14 @@ function MainApp() {
   }
 
   function clampLogsPanelHeight(nextHeight: number) {
-    const mainPaneHeight = mainPaneRef.current?.getBoundingClientRect().height ?? window.innerHeight;
-    const maxHeight = Math.max(180, mainPaneHeight - 280);
-    return Math.min(Math.max(nextHeight, 140), maxHeight);
+    const mainPane = mainPaneRef.current;
+    const mainPaneHeight = mainPane?.getBoundingClientRect().height ?? window.innerHeight;
+    const toolbarHeight = mainPane?.querySelector(".toolbar")?.getBoundingClientRect().height ?? 0;
+    const resizeHandleHeight = 8;
+    const minScriptsPanelHeight = 96;
+    const minLogsPanelHeight = 96;
+    const maxHeight = Math.max(minLogsPanelHeight, mainPaneHeight - toolbarHeight - resizeHandleHeight - minScriptsPanelHeight);
+    return Math.min(Math.max(nextHeight, minLogsPanelHeight), maxHeight);
   }
 
   function startLogsResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -214,6 +321,20 @@ function MainApp() {
           : workspace
       )
     }));
+  }
+
+  async function copyMainLogs() {
+    try {
+      await copyTextToClipboard(logsToClipboardText(visibleLogs));
+    } catch (reason) {
+      const message = String(reason);
+      setError(`Copy error: ${message}`);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to copy logs.", details: message });
+    }
+  }
+
+  function toggleMainLogLevel(level: LogLevel, checked: boolean) {
+    setLogLevelFilter((current) => ({ ...current, [level]: checked }));
   }
 
   async function openRuntimePath() {
@@ -616,23 +737,35 @@ function MainApp() {
         <section className="logsPanel" aria-label="Logs">
           <div className="logsHeader">
             <h2><ScrollText size={17} /> Logs</h2>
+            <div className="logLevelFilters" aria-label="Log level filters">
+              {LOG_LEVELS.map((level) => (
+                <label className={`levelFilter ${level}`} key={level}>
+                  <input type="checkbox" checked={logLevelFilter[level]} onChange={(event) => toggleMainLogLevel(level, event.target.checked)} />
+                  <span>{level}</span>
+                </label>
+              ))}
+            </div>
             <div className="logsHeaderActions">
               <label className="checkboxLine logAutoscrollToggle">
                 <input type="checkbox" checked={logsAutoscroll} onChange={(event) => setLogsAutoscroll(event.target.checked)} />
                 <span>Autoscroll</span>
               </label>
+              <button type="button" title="Copy Logs" aria-label="Copy Logs" disabled={visibleLogs.length === 0} onClick={() => void copyMainLogs()}>
+                <Copy size={16} /> Copy
+              </button>
               <button type="button" title="Clear Logs" aria-label="Clear Logs" onClick={() => updateActiveWorkspace((workspace) => ({ ...workspace, logs: [] }))}>
-                <Trash2 size={16} /> Clear Logs
+                <Trash2 size={16} /> Clear
               </button>
             </div>
           </div>
-          <div className="logsList" ref={logsListRef}>
+          <div className="logsList" ref={logsListRef} onCopy={copySelectedLogs}>
             {activeWorkspace.logs.length === 0 && <div className="emptyState">No logs yet.</div>}
-            {activeWorkspace.logs.map((log) => (
+            {activeWorkspace.logs.length > 0 && visibleLogs.length === 0 && <div className="emptyState">No logs match the selected levels.</div>}
+            {visibleLogs.map((log) => (
               <div className={`logLine ${log.level}`} key={log.id}>
                 <time>{new Date(log.timestamp).toLocaleTimeString()}</time>
                 <span>{log.level}</span>
-                <p>{log.message}</p>
+                <p data-log-message="true">{log.message}</p>
               </div>
             ))}
           </div>
@@ -766,12 +899,14 @@ function ScriptLogWindow({ params }: { params: globalThis.URLSearchParams }) {
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [logsAutoscroll, setLogsAutoscroll] = useState(true);
+  const [logLevelFilter, setLogLevelFilter] = useState<Record<LogLevel, boolean>>(createDefaultLogLevelFilter);
   const [error, setError] = useState("");
   const logsListRef = useRef<HTMLDivElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
   const streamBuffersRef = useRef<Record<string, string>>({});
   const runningRef = useRef(false);
   const executionIdRef = useRef(executionId);
+  const visibleLogs = useMemo(() => filterLogsByLevel(logs, logLevelFilter), [logs, logLevelFilter]);
 
   useEffect(() => {
     if (!logsAutoscroll) {
@@ -981,12 +1116,32 @@ function ScriptLogWindow({ params }: { params: globalThis.URLSearchParams }) {
     }
   }
 
+  async function copyWindowLogs() {
+    try {
+      await copyTextToClipboard(logsToClipboardText(visibleLogs));
+    } catch (reason) {
+      setError(`Copy error: ${String(reason)}`);
+    }
+  }
+
+  function toggleWindowLogLevel(level: LogLevel, checked: boolean) {
+    setLogLevelFilter((current) => ({ ...current, [level]: checked }));
+  }
+
   return (
     <div className="logWindowShell">
       <header className="logWindowHeader">
         <div>
           <h1>{scriptName}</h1>
           <span>{workspaceTitle}</span>
+        </div>
+        <div className="logLevelFilters" aria-label="Log level filters">
+          {LOG_LEVELS.map((level) => (
+            <label className={`levelFilter ${level}`} key={level}>
+              <input type="checkbox" checked={logLevelFilter[level]} onChange={(event) => toggleWindowLogLevel(level, event.target.checked)} />
+              <span>{level}</span>
+            </label>
+          ))}
         </div>
         <div className="rowActions">
           <label className="checkboxLine logAutoscrollToggle">
@@ -999,6 +1154,9 @@ function ScriptLogWindow({ params }: { params: globalThis.URLSearchParams }) {
           <button type="button" className="dangerButton" disabled={!running || stopping} onClick={stopWindowExecution}>
             <Square size={15} /> {stopping ? "Stopping" : "Stop"}
           </button>
+          <button type="button" title="Copy Logs" aria-label="Copy Logs" disabled={visibleLogs.length === 0} onClick={() => void copyWindowLogs()}>
+            <Copy size={15} /> Copy
+          </button>
           <button type="button" onClick={() => setLogs([])}>
             <Trash2 size={15} /> Clear
           </button>
@@ -1006,13 +1164,14 @@ function ScriptLogWindow({ params }: { params: globalThis.URLSearchParams }) {
       </header>
       {error && <div className="topError logWindowError">{error}</div>}
       <section className="logsPanel logWindowLogs" aria-label="Script logs">
-        <div className="logsList" ref={logsListRef}>
+        <div className="logsList" ref={logsListRef} onCopy={copySelectedLogs}>
           {logs.length === 0 && <div className="emptyState">{started ? "Waiting for logs..." : "Ready to start."}</div>}
-          {logs.map((log) => (
+          {logs.length > 0 && visibleLogs.length === 0 && <div className="emptyState">No logs match the selected levels.</div>}
+          {visibleLogs.map((log) => (
             <div className={`logLine ${log.level}`} key={log.id}>
               <time>{new Date(log.timestamp).toLocaleTimeString()}</time>
               <span>{log.level}</span>
-              <p>{log.message}</p>
+              <p data-log-message="true">{log.message}</p>
             </div>
           ))}
           <div className="logsEndAnchor" ref={logsEndRef} />

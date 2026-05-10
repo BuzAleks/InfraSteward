@@ -13,7 +13,13 @@
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+  min-height: 0;
 }
 
 button,
@@ -63,9 +69,11 @@ textarea {
 }
 
 .appShell {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .tabStrip {
@@ -111,8 +119,9 @@ textarea {
 .mainPane {
   flex: 1;
   display: grid;
-  grid-template-rows: auto minmax(180px, 1fr) 8px minmax(140px, var(--logs-panel-height, 260px));
+  grid-template-rows: auto minmax(0, 1fr) 8px minmax(0, var(--logs-panel-height, 260px));
   min-height: 0;
+  overflow: hidden;
 }
 
 .toolbar {
@@ -170,7 +179,9 @@ textarea {
 .scriptsPanel {
   padding: 14px;
   min-height: 0;
-  overflow: auto;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .sectionHeading {
@@ -194,6 +205,15 @@ textarea {
 .scriptCatalog {
   display: grid;
   gap: 8px;
+  align-content: start;
+  grid-auto-rows: max-content;
+}
+
+.scriptsPanel .scriptRows {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  align-items: start;
 }
 
 .scriptRow,
@@ -303,6 +323,7 @@ textarea {
   color: #d9e2ec;
   display: grid;
   grid-template-rows: auto 1fr;
+  overflow: hidden;
 }
 
 .logWindowShell {
@@ -383,12 +404,15 @@ textarea {
 
 .logsHeader {
   padding: 8px 12px;
-  justify-content: space-between;
+  justify-content: flex-start;
   border-bottom: 1px solid #263244;
+  flex-wrap: wrap;
 }
 
 .logsHeaderActions {
   margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .logAutoscrollToggle {
@@ -396,8 +420,35 @@ textarea {
   user-select: none;
 }
 
-.logWindowHeader .logAutoscrollToggle {
+.logWindowHeader .rowActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.logWindowHeader .logAutoscrollToggle,
+.logWindowHeader .levelFilter {
   color: #17202a;
+}
+
+.logLevelFilters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-right: 8px;
+}
+
+.levelFilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #d9e2ec;
+  font-size: 12px;
+  user-select: none;
+}
+
+.levelFilter input {
+  width: auto;
 }
 
 .logsHeader h2 {
@@ -413,6 +464,7 @@ textarea {
   padding: 8px 12px;
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   font-size: 13px;
+  user-select: text;
 }
 
 .logLine {
@@ -427,6 +479,12 @@ textarea {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
+}
+
+.logLine time,
+.logLine > span {
+  user-select: none;
 }
 
 .logLine.stdout p {
