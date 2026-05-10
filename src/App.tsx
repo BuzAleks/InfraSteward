@@ -1,14 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
-import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square } from "lucide-react";
 import { AddScriptsDialog } from "./components/AddScriptsDialog";
 import { ConnectionSettings } from "./components/ConnectionSettings";
 import { Modal } from "./components/Modal";
 import { ScriptManager } from "./components/ScriptManager";
 import { ScriptSettings } from "./components/ScriptSettings";
 import { createDefaultAppData, createWorkspace, MAX_LOGS_PER_WORKSPACE } from "./lib/appData";
-import { saveAppData, loadAppData, runScript, saveConnection, testConnection } from "./lib/backend";
+import {
+  saveAppData,
+  loadAppData,
+  runScript,
+  saveConnection,
+  testConnection,
+  logSystemEvent,
+  getRuntimeInfo,
+  openWorkingDataDir,
+  cancelScript,
+  drainScriptEvents
+} from "./lib/backend";
 import { createId, nowIso } from "./lib/ids";
-import type { AppData, AttachedScript, GlobalScript, LogEntry, WorkspaceTab } from "./lib/types";
+import type { AppData, AttachedScript, GlobalScript, LogEntry, ScriptExecutionEvent, WorkspaceTab } from "./lib/types";
 
 type ModalState =
   | { kind: "none" }
@@ -17,25 +29,110 @@ type ModalState =
   | { kind: "addScripts" }
   | { kind: "scriptSettings"; attachedScriptId: string };
 
+type RunningExecution = {
+  workspaceId: string;
+  attachedScriptId: string;
+  scriptName: string;
+};
+
 export function App() {
   const [data, setData] = useState<AppData>(createDefaultAppData);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [error, setError] = useState("");
-  const [runningScriptId, setRunningScriptId] = useState<string | null>(null);
+  const [runningExecution, setRunningExecution] = useState<RunningExecution | null>(null);
+  const [stoppingScriptId, setStoppingScriptId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [logsPanelHeight, setLogsPanelHeight] = useState(260);
+  const [runtimePath, setRuntimePath] = useState("");
+  const [systemLogPath, setSystemLogPath] = useState("");
+  const mainPaneRef = useRef<HTMLElement | null>(null);
+  const logsListRef = useRef<HTMLDivElement | null>(null);
+  const streamBuffersRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
-    loadAppData().then(setData).catch((reason) => setError(String(reason)));
+    getRuntimeInfo()
+      .then((info) => {
+        setRuntimePath(info.workingDataDir);
+        setSystemLogPath(info.systemLogPath);
+      })
+      .catch((reason) => {
+        const message = String(reason);
+        setError(message);
+        void logSystemEvent({ level: "error", target: "frontend", message: "Failed to read runtime info.", details: message });
+      });
+    loadAppData()
+      .then(setData)
+      .catch((reason) => {
+        const message = String(reason);
+        setError(message);
+        void logSystemEvent({ level: "error", target: "frontend", message: "Failed to load app data.", details: message });
+      });
   }, []);
 
   useEffect(() => {
-    saveAppData(data).catch((reason) => setError(`Storage error: ${String(reason)}`));
+    saveAppData(data).catch((reason) => {
+      const message = String(reason);
+      setError(`Storage error: ${message}`);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to save app data.", details: message });
+    });
   }, [data]);
+
+  useEffect(() => {
+    if (!runningExecution) {
+      return;
+    }
+
+    let disposed = false;
+    let polling = false;
+
+    async function poll() {
+      if (disposed || polling || !runningExecution) {
+        return;
+      }
+      polling = true;
+      try {
+        const events = await drainScriptEvents({
+          workspaceId: runningExecution.workspaceId,
+          attachedScriptId: runningExecution.attachedScriptId
+        });
+        for (const event of events) {
+          handleScriptExecutionEvent(event);
+        }
+      } catch (reason) {
+        const message = String(reason);
+        setError(`Log polling error: ${message}`);
+        void logSystemEvent({ level: "error", target: "frontend", message: "Failed to poll script logs.", details: message });
+      } finally {
+        polling = false;
+      }
+    }
+
+    void poll();
+    const intervalId = window.setInterval(() => {
+      void poll();
+    }, 250);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
+    // Polling intentionally binds to the current execution; log helpers use functional state updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runningExecution]);
 
   const activeWorkspace = useMemo(
     () => data.workspaces.find((workspace) => workspace.id === data.activeTabId) ?? data.workspaces[0],
     [data.activeTabId, data.workspaces]
   );
+  const latestLogId = activeWorkspace?.logs.at(-1)?.id;
+
+  useEffect(() => {
+    const logsList = logsListRef.current;
+    if (!logsList) {
+      return;
+    }
+    logsList.scrollTop = logsList.scrollHeight;
+  }, [activeWorkspace?.id, latestLogId]);
 
   const attachmentCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -52,6 +149,32 @@ export function App() {
       ...current,
       workspaces: current.workspaces.map((workspace) => (workspace.id === current.activeTabId ? updater(workspace) : workspace))
     }));
+  }
+
+  function clampLogsPanelHeight(nextHeight: number) {
+    const mainPaneHeight = mainPaneRef.current?.getBoundingClientRect().height ?? window.innerHeight;
+    const maxHeight = Math.max(180, mainPaneHeight - 280);
+    return Math.min(Math.max(nextHeight, 140), maxHeight);
+  }
+
+  function startLogsResize(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const handlePointerMove = (moveEvent: globalThis.PointerEvent) => {
+      const rect = mainPaneRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      setLogsPanelHeight(clampLogsPanelHeight(rect.bottom - moveEvent.clientY));
+    };
+    const stopResize = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize);
   }
 
   function appendLog(workspaceId: string, entry: Omit<LogEntry, "id" | "timestamp">) {
@@ -73,6 +196,16 @@ export function App() {
           : workspace
       )
     }));
+  }
+
+  async function openRuntimePath() {
+    try {
+      await openWorkingDataDir();
+    } catch (reason) {
+      const message = String(reason);
+      setError(`Could not open working directory: ${message}`);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to open working directory.", details: message });
+    }
   }
 
   function addTab() {
@@ -110,11 +243,18 @@ export function App() {
   }
 
   async function execute(attached: AttachedScript, script: GlobalScript | undefined) {
-    if (!script || runningScriptId === attached.id) {
+    if (!script || runningExecution?.attachedScriptId === attached.id) {
       return;
     }
 
-    setRunningScriptId(attached.id);
+    const execution: RunningExecution = {
+      workspaceId: activeWorkspace.id,
+      attachedScriptId: attached.id,
+      scriptName: script.name
+    };
+    setRunningExecution(execution);
+    delete streamBuffersRef.current[`${activeWorkspace.id}:${attached.id}:stdout`];
+    delete streamBuffersRef.current[`${activeWorkspace.id}:${attached.id}:stderr`];
     appendLog(activeWorkspace.id, {
       level: "info",
       message: `starting ${script.name}`,
@@ -123,28 +263,103 @@ export function App() {
     });
 
     try {
-      const result = await runScript({ workspaceId: activeWorkspace.id, attachedScriptId: attached.id });
-      for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
-        appendLog(activeWorkspace.id, { level: "stdout", message: line, scriptId: attached.id, status: result.status });
-      }
-      for (const line of result.stderr.split(/\r?\n/).filter(Boolean)) {
-        appendLog(activeWorkspace.id, { level: "stderr", message: line, scriptId: attached.id, status: result.status });
-      }
-      appendLog(activeWorkspace.id, {
-        level: result.status === "success" ? "info" : "error",
-        message: `${script.name} finished with status ${result.status}${result.exitCode === undefined ? "" : ` and exit code ${result.exitCode}`}`,
-        scriptId: attached.id,
-        status: result.status
-      });
+      await runScript({ workspaceId: activeWorkspace.id, attachedScriptId: attached.id });
     } catch (reason) {
+      flushStreamBuffer(activeWorkspace.id, attached.id, "stdout", "failed");
+      flushStreamBuffer(activeWorkspace.id, attached.id, "stderr", "failed");
+      setRunningExecution(null);
+      void logSystemEvent({
+        level: "error",
+        target: "frontend",
+        message: "Script execution failed in UI flow.",
+        details: String(reason)
+      });
       appendLog(activeWorkspace.id, {
         level: "error",
         message: String(reason),
         scriptId: attached.id,
         status: "failed"
       });
-    } finally {
-      setRunningScriptId(null);
+      setStoppingScriptId(null);
+    }
+  }
+
+  async function stopExecution(attached: AttachedScript) {
+    if (runningExecution?.attachedScriptId !== attached.id || stoppingScriptId === attached.id) {
+      return;
+    }
+
+    setStoppingScriptId(attached.id);
+    appendLog(activeWorkspace.id, {
+      level: "warn",
+      message: "stop requested",
+      scriptId: attached.id,
+      status: "cancelled"
+    });
+
+    try {
+      await cancelScript({ workspaceId: runningExecution.workspaceId, attachedScriptId: attached.id });
+    } catch (reason) {
+      const message = String(reason);
+      setStoppingScriptId(null);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to stop script.", details: message });
+      appendLog(activeWorkspace.id, {
+        level: "error",
+        message,
+        scriptId: attached.id,
+        status: "failed"
+      });
+    }
+  }
+
+  function flushStreamBuffer(workspaceId: string, attachedScriptId: string, stream: "stdout" | "stderr", status: LogEntry["status"]) {
+    const key = `${workspaceId}:${attachedScriptId}:${stream}`;
+    const pending = streamBuffersRef.current[key];
+    if (pending?.trim()) {
+      appendLog(workspaceId, {
+        level: stream,
+        message: pending,
+        scriptId: attachedScriptId,
+        status
+      });
+    }
+    delete streamBuffersRef.current[key];
+  }
+
+  function handleScriptExecutionEvent(event: ScriptExecutionEvent) {
+    if (event.kind === "output" && event.stream && event.chunk) {
+      appendOutputChunk(event.workspaceId, event.attachedScriptId, event.stream, event.chunk);
+      return;
+    }
+
+    if (event.kind === "finished") {
+      const status = event.status ?? "failed";
+      flushStreamBuffer(event.workspaceId, event.attachedScriptId, "stdout", status);
+      flushStreamBuffer(event.workspaceId, event.attachedScriptId, "stderr", status);
+      appendLog(event.workspaceId, {
+        level: status === "success" ? "info" : status === "cancelled" ? "warn" : "error",
+        message: `${runningExecution?.scriptName ?? "Script"} finished with status ${status}${event.exitCode === undefined ? "" : ` and exit code ${event.exitCode}`}${event.message ? `: ${event.message}` : ""}`,
+        scriptId: event.attachedScriptId,
+        status
+      });
+      setRunningExecution(null);
+      setStoppingScriptId(null);
+    }
+  }
+
+  function appendOutputChunk(workspaceId: string, attachedScriptId: string, stream: "stdout" | "stderr", chunk: string) {
+    const key = `${workspaceId}:${attachedScriptId}:${stream}`;
+    const nextText = `${streamBuffersRef.current[key] ?? ""}${chunk}`;
+    const lines = nextText.split(/\r?\n/);
+    streamBuffersRef.current[key] = lines.pop() ?? "";
+
+    for (const line of lines.filter(Boolean)) {
+      appendLog(workspaceId, {
+        level: stream,
+        message: line,
+        scriptId: attachedScriptId,
+        status: "running"
+      });
     }
   }
 
@@ -191,7 +406,11 @@ export function App() {
         </button>
       </header>
 
-      <main className="mainPane">
+      <main
+        className="mainPane"
+        ref={mainPaneRef}
+        style={{ "--logs-panel-height": `${logsPanelHeight}px` } as CSSProperties}
+      >
         <nav className="toolbar" aria-label="Main toolbar">
           <button type="button" onClick={() => setModal({ kind: "connection" })}>
             <Settings size={17} /> Connection Settings
@@ -199,6 +418,17 @@ export function App() {
           <button type="button" onClick={() => setModal({ kind: "scripts" })}>
             <FileCog size={17} /> Script Manager
           </button>
+          {runtimePath && (
+            <button
+              type="button"
+              className="runtimePath"
+              title={`Open working directory\n${runtimePath}\nSystem log: ${systemLogPath}`}
+              onClick={openRuntimePath}
+            >
+              <span>Working directory</span>
+              <code>{runtimePath}</code>
+            </button>
+          )}
           {error && <div className="topError" role="alert">{error}</div>}
         </nav>
 
@@ -211,7 +441,8 @@ export function App() {
             {activeWorkspace.attachedScripts.length === 0 && <div className="emptyState">No scripts attached.</div>}
             {activeWorkspace.attachedScripts.map((attached) => {
               const script = data.globalScripts.find((candidate) => candidate.id === attached.globalScriptId);
-              const isRunning = runningScriptId === attached.id;
+              const isRunning = runningExecution?.workspaceId === activeWorkspace.id && runningExecution.attachedScriptId === attached.id;
+              const isStopping = stoppingScriptId === attached.id;
               return (
                 <article className={`scriptRow ${attached.selected ? "selected" : ""}`} key={attached.id}>
                   <label className="selectCell">
@@ -254,6 +485,18 @@ export function App() {
                     >
                       <Play size={16} /> {isRunning ? "Running" : "Run"}
                     </button>
+                    {isRunning && (
+                      <button
+                        type="button"
+                        className="dangerButton"
+                        title="Stop"
+                        aria-label={`Stop ${script?.name ?? "running script"}`}
+                        disabled={isStopping}
+                        onClick={() => stopExecution(attached)}
+                      >
+                        <Square size={15} /> {isStopping ? "Stopping" : "Stop"}
+                      </button>
+                    )}
                   </div>
                 </article>
               );
@@ -287,6 +530,25 @@ export function App() {
           </div>
         </section>
 
+        <div
+          className="panelResizeHandle"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize logs panel"
+          tabIndex={0}
+          onPointerDown={startLogsResize}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              setLogsPanelHeight((height) => clampLogsPanelHeight(height + 24));
+            }
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              setLogsPanelHeight((height) => clampLogsPanelHeight(height - 24));
+            }
+          }}
+        />
+
         <section className="logsPanel" aria-label="Logs">
           <div className="logsHeader">
             <h2><ScrollText size={17} /> Logs</h2>
@@ -294,7 +556,7 @@ export function App() {
               <Trash2 size={16} /> Clear Logs
             </button>
           </div>
-          <div className="logsList">
+          <div className="logsList" ref={logsListRef}>
             {activeWorkspace.logs.length === 0 && <div className="emptyState">No logs yet.</div>}
             {activeWorkspace.logs.map((log) => (
               <div className={`logLine ${log.level}`} key={log.id}>
@@ -321,6 +583,12 @@ export function App() {
                 const message = await testConnection(activeWorkspace.id);
                 appendLog(activeWorkspace.id, { level: "info", message, status: "connected" });
               } catch (reason) {
+                void logSystemEvent({
+                  level: "error",
+                  target: "frontend",
+                  message: "Connection test failed in UI flow.",
+                  details: String(reason)
+                });
                 appendLog(activeWorkspace.id, { level: "error", message: String(reason), status: "failed" });
               } finally {
                 setBusy(false);

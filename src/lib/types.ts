@@ -105,6 +105,21 @@ export type ExecutionResult = {
   exitCode?: number;
 };
 
+export type ExecutionStart = {
+  executionId: string;
+};
+
+export type ScriptExecutionEvent = {
+  kind: "output" | "finished";
+  workspaceId: string;
+  attachedScriptId: string;
+  stream?: "stdout" | "stderr";
+  chunk?: string;
+  status?: ExecutionStatus;
+  exitCode?: number;
+  message?: string;
+};
+
 export type McpToolDefinition = {
   name: string;
   description: string;

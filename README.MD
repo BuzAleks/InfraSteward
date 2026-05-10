@@ -90,7 +90,7 @@ The backend first uses the operating system keychain. If the OS keychain is unav
 
 ## Script Parameters
 
-InfraSteward detects `${VAR}` style variables in scripts. Manual values are passed to the remote shell as environment variables instead of being substituted directly into script text.
+InfraSteward detects `${VAR}` and `${VAR:-default}` style variables in scripts. Bare `$VAR` references are ignored to avoid over-detecting internal shell variables. Manual values are passed to the remote shell as environment variables instead of being substituted directly into script text.
 
 Example:
 
@@ -148,4 +148,3 @@ Additional notes live in `docs/`:
 - `docs/storage-format.md`
 - `docs/ssh-execution.md`
 - `docs/mcp-integration.md`
-

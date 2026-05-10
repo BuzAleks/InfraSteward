@@ -23,6 +23,9 @@ tempfile = "3.14"
 thiserror = "2.0"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
