@@ -14,7 +14,7 @@ env:
 
 jobs:
   release-info:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       name: ${{ steps.meta.outputs.name }}
@@ -53,13 +53,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-13
-            args: "--target x86_64-apple-darwin --bundles app,dmg"
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin --bundles dmg"
             rust-target: x86_64-apple-darwin
-          - platform: ubuntu-24.04
+          - platform: macos-latest
+            args: ""
+            rust-target: ""
+          - platform: ubuntu-latest
             args: "--bundles appimage,deb"
             rust-target: ""
-          - platform: windows-2022
+          - platform: windows-latest
             args: "--bundles msi"
             rust-target: ""
     runs-on: ${{ matrix.platform }}
