@@ -141,6 +141,7 @@ pub struct ConnectionSaveRequest {
 pub struct ExecutionRequest {
     workspace_id: String,
     attached_script_id: String,
+    execution_id: Option<String>,
     parameter_overrides: Option<HashMap<String, String>>,
 }
 
@@ -149,6 +150,7 @@ pub struct ExecutionRequest {
 pub struct CancelExecutionRequest {
     workspace_id: String,
     attached_script_id: String,
+    execution_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -179,6 +181,7 @@ pub struct SystemLogEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ScriptExecutionEvent {
     kind: String,
+    execution_id: String,
     workspace_id: String,
     attached_script_id: String,
     stream: Option<String>,
@@ -404,6 +407,11 @@ async fn run_script(
 ) -> Result<ExecutionStart, InfraError> {
     let workspace_id = request.workspace_id.clone();
     let attached_script_id = request.attached_script_id.clone();
+    let execution_id = request
+        .execution_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| execution_key(&workspace_id, &attached_script_id));
     write_system_log(
         &app,
         "info",
@@ -445,7 +453,6 @@ async fn run_script(
 
     let command = prepare_remote_command(&script.content, &settings);
     let connection = workspace.connection;
-    let execution_key = execution_key(&workspace_id, &attached_script_id);
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let events = Arc::new(Mutex::new(VecDeque::new()));
     let finished = Arc::new(AtomicBool::new(false));
@@ -453,11 +460,11 @@ async fn run_script(
         let mut active = active_executions
             .lock()
             .map_err(|err| InfraError::Storage(err.to_string()))?;
-        if active.contains_key(&execution_key) {
+        if active.contains_key(&execution_id) {
             return Err(InfraError::Validation("Script is already running.".into()));
         }
         active.insert(
-            execution_key.clone(),
+            execution_id.clone(),
             ActiveExecution {
                 cancel_flag: cancel_flag.clone(),
                 events: events.clone(),
@@ -466,9 +473,11 @@ async fn run_script(
         );
     }
 
+    let background_execution_id = execution_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
         run_script_blocking(
             app,
+            background_execution_id,
             workspace_id,
             attached_script_id,
             connection,
@@ -479,9 +488,7 @@ async fn run_script(
         )
     });
 
-    Ok(ExecutionStart {
-        execution_id: execution_key,
-    })
+    Ok(ExecutionStart { execution_id })
 }
 
 #[tauri::command]
@@ -489,7 +496,10 @@ fn cancel_script(
     active_executions: State<'_, ActiveExecutions>,
     request: CancelExecutionRequest,
 ) -> Result<(), InfraError> {
-    let execution_key = execution_key(&request.workspace_id, &request.attached_script_id);
+    let execution_key = request
+        .execution_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| execution_key(&request.workspace_id, &request.attached_script_id));
     let active = active_executions
         .lock()
         .map_err(|err| InfraError::Storage(err.to_string()))?;
@@ -505,7 +515,10 @@ fn drain_script_events(
     active_executions: State<'_, ActiveExecutions>,
     request: CancelExecutionRequest,
 ) -> Result<Vec<ScriptExecutionEvent>, InfraError> {
-    let execution_key = execution_key(&request.workspace_id, &request.attached_script_id);
+    let execution_key = request
+        .execution_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| execution_key(&request.workspace_id, &request.attached_script_id));
     let (events, finished) = {
         let active = active_executions
             .lock()
@@ -538,6 +551,7 @@ fn execution_key(workspace_id: &str, attached_script_id: &str) -> String {
 
 fn run_script_blocking(
     app: AppHandle,
+    execution_id: String,
     workspace_id: String,
     attached_script_id: String,
     connection: SshConnectionConfig,
@@ -549,6 +563,7 @@ fn run_script_blocking(
     let result = execute_ssh_command(
         &app,
         &connection,
+        &execution_id,
         &workspace_id,
         &attached_script_id,
         &command,
@@ -582,6 +597,7 @@ fn run_script_blocking(
         &events,
         ScriptExecutionEvent {
             kind: "finished".into(),
+            execution_id,
             workspace_id,
             attached_script_id,
             stream: None,
@@ -723,6 +739,7 @@ fn connect_session(
 fn execute_ssh_command(
     app: &AppHandle,
     connection: &SshConnectionConfig,
+    execution_id: &str,
     workspace_id: &str,
     attached_script_id: &str,
     command: &str,
@@ -768,6 +785,7 @@ fn execute_ssh_command(
         let mut read_any = false;
         read_any |= read_channel_stream(
             app,
+            execution_id,
             workspace_id,
             attached_script_id,
             "stdout",
@@ -780,6 +798,7 @@ fn execute_ssh_command(
             let mut stderr_stream = channel.stderr();
             read_any |= read_channel_stream(
                 app,
+                execution_id,
                 workspace_id,
                 attached_script_id,
                 "stderr",
@@ -816,6 +835,7 @@ fn execute_ssh_command(
 
 fn read_channel_stream<R: Read>(
     _app: &AppHandle,
+    execution_id: &str,
     workspace_id: &str,
     attached_script_id: &str,
     stream_name: &str,
@@ -836,6 +856,7 @@ fn read_channel_stream<R: Read>(
                     events,
                     ScriptExecutionEvent {
                         kind: "output".into(),
+                        execution_id: execution_id.into(),
                         workspace_id: workspace_id.into(),
                         attached_script_id: attached_script_id.into(),
                         stream: Some(stream_name.into()),

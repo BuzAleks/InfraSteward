@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square } from "lucide-react";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink } from "lucide-react";
 import { AddScriptsDialog } from "./components/AddScriptsDialog";
 import { ConnectionSettings } from "./components/ConnectionSettings";
 import { Modal } from "./components/Modal";
@@ -30,12 +31,21 @@ type ModalState =
   | { kind: "scriptSettings"; attachedScriptId: string };
 
 type RunningExecution = {
+  executionId: string;
   workspaceId: string;
   attachedScriptId: string;
   scriptName: string;
 };
 
 export function App() {
+  const params = new globalThis.URLSearchParams(window.location.search);
+  if (params.get("view") === "script-log") {
+    return <ScriptLogWindow params={params} />;
+  }
+  return <MainApp />;
+}
+
+function MainApp() {
   const [data, setData] = useState<AppData>(createDefaultAppData);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [error, setError] = useState("");
@@ -43,6 +53,7 @@ export function App() {
   const [stoppingScriptId, setStoppingScriptId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [logsPanelHeight, setLogsPanelHeight] = useState(260);
+  const [logsAutoscroll, setLogsAutoscroll] = useState(true);
   const [runtimePath, setRuntimePath] = useState("");
   const [systemLogPath, setSystemLogPath] = useState("");
   const mainPaneRef = useRef<HTMLElement | null>(null);
@@ -92,6 +103,7 @@ export function App() {
       polling = true;
       try {
         const events = await drainScriptEvents({
+          executionId: runningExecution.executionId,
           workspaceId: runningExecution.workspaceId,
           attachedScriptId: runningExecution.attachedScriptId
         });
@@ -127,12 +139,18 @@ export function App() {
   const latestLogId = activeWorkspace?.logs.at(-1)?.id;
 
   useEffect(() => {
+    if (!logsAutoscroll) {
+      return;
+    }
     const logsList = logsListRef.current;
     if (!logsList) {
       return;
     }
-    logsList.scrollTop = logsList.scrollHeight;
-  }, [activeWorkspace?.id, latestLogId]);
+    const frameId = window.requestAnimationFrame(() => {
+      logsList.scrollTop = logsList.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeWorkspace?.id, latestLogId, logsAutoscroll]);
 
   const attachmentCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -247,7 +265,9 @@ export function App() {
       return;
     }
 
+    const executionId = createId("execution");
     const execution: RunningExecution = {
+      executionId,
       workspaceId: activeWorkspace.id,
       attachedScriptId: attached.id,
       scriptName: script.name
@@ -263,7 +283,7 @@ export function App() {
     });
 
     try {
-      await runScript({ workspaceId: activeWorkspace.id, attachedScriptId: attached.id });
+      await runScript({ executionId, workspaceId: activeWorkspace.id, attachedScriptId: attached.id });
     } catch (reason) {
       flushStreamBuffer(activeWorkspace.id, attached.id, "stdout", "failed");
       flushStreamBuffer(activeWorkspace.id, attached.id, "stderr", "failed");
@@ -298,7 +318,7 @@ export function App() {
     });
 
     try {
-      await cancelScript({ workspaceId: runningExecution.workspaceId, attachedScriptId: attached.id });
+      await cancelScript({ executionId: runningExecution.executionId, workspaceId: runningExecution.workspaceId, attachedScriptId: attached.id });
     } catch (reason) {
       const message = String(reason);
       setStoppingScriptId(null);
@@ -310,6 +330,38 @@ export function App() {
         status: "failed"
       });
     }
+  }
+
+  async function openScriptLogWindow(attached: AttachedScript, script: GlobalScript | undefined) {
+    if (!script) {
+      return;
+    }
+    if (!("__TAURI_INTERNALS__" in window)) {
+      setError("New log windows require the Tauri desktop runtime.");
+      return;
+    }
+
+    const executionId = createId("execution");
+    const params = new globalThis.URLSearchParams({
+      view: "script-log",
+      executionId,
+      workspaceId: activeWorkspace.id,
+      attachedScriptId: attached.id,
+      scriptName: script.name,
+      workspaceTitle: activeWorkspace.title
+    });
+    const label = `script_logs_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const logWindow = new WebviewWindow(label, {
+      url: `index.html?${params.toString()}`,
+      title: `${script.name} logs`,
+      width: 980,
+      height: 680,
+      minWidth: 620,
+      minHeight: 420
+    });
+    await logWindow.once("tauri://error", (event) => {
+      setError(`Could not open log window: ${String(event.payload)}`);
+    });
   }
 
   function flushStreamBuffer(workspaceId: string, attachedScriptId: string, stream: "stdout" | "stderr", status: LogEntry["status"]) {
@@ -442,6 +494,8 @@ export function App() {
             {activeWorkspace.attachedScripts.map((attached) => {
               const script = data.globalScripts.find((candidate) => candidate.id === attached.globalScriptId);
               const isRunning = runningExecution?.workspaceId === activeWorkspace.id && runningExecution.attachedScriptId === attached.id;
+              const isAnyScriptRunning = Boolean(runningExecution);
+              const isBlockedByAnotherScript = isAnyScriptRunning && !isRunning;
               const isStopping = stoppingScriptId === attached.id;
               return (
                 <article className={`scriptRow ${attached.selected ? "selected" : ""}`} key={attached.id}>
@@ -462,7 +516,6 @@ export function App() {
                   </label>
                   <div className="scriptSummary">
                     <strong>{script?.name ?? "Missing global script"}</strong>
-                    <span>{script?.description ?? "This global script was deleted or is unavailable."}</span>
                     {attached.useInMcp && <small>Use in MCP enabled</small>}
                   </div>
                   <div className="rowActions">
@@ -473,30 +526,41 @@ export function App() {
                       disabled={!script}
                       onClick={() => setModal({ kind: "scriptSettings", attachedScriptId: attached.id })}
                     >
-                      <Settings size={16} /> Settings
+                      <Settings size={16} />
                     </button>
                     <button
                       type="button"
                       className="primaryButton"
-                      title="Run"
+                      title={isRunning ? "Running" : isBlockedByAnotherScript ? "Blocked while another script is running" : "Run"}
                       aria-label={`Run ${script?.name ?? "missing script"}`}
-                      disabled={!script || isRunning}
+                      disabled={!script || isAnyScriptRunning}
                       onClick={() => execute(attached, script)}
                     >
-                      <Play size={16} /> {isRunning ? "Running" : "Run"}
+                      <Play size={16} />
                     </button>
                     {isRunning && (
                       <button
                         type="button"
                         className="dangerButton"
-                        title="Stop"
+                        title={isStopping ? "Stopping" : "Stop"}
                         aria-label={`Stop ${script?.name ?? "running script"}`}
                         disabled={isStopping}
                         onClick={() => stopExecution(attached)}
                       >
-                        <Square size={15} /> {isStopping ? "Stopping" : "Stop"}
+                        <Square size={15} />
                       </button>
                     )}
+                    <button
+                      type="button"
+                      title="Запуск в новом окне"
+                      aria-label={`Запуск ${script?.name ?? "missing script"} в новом окне`}
+                      disabled={!script}
+                      onClick={() => {
+                        void openScriptLogWindow(attached, script);
+                      }}
+                    >
+                      <ExternalLink size={16} />
+                    </button>
                   </div>
                 </article>
               );
@@ -552,9 +616,15 @@ export function App() {
         <section className="logsPanel" aria-label="Logs">
           <div className="logsHeader">
             <h2><ScrollText size={17} /> Logs</h2>
-            <button type="button" title="Clear Logs" aria-label="Clear Logs" onClick={() => updateActiveWorkspace((workspace) => ({ ...workspace, logs: [] }))}>
-              <Trash2 size={16} /> Clear Logs
-            </button>
+            <div className="logsHeaderActions">
+              <label className="checkboxLine logAutoscrollToggle">
+                <input type="checkbox" checked={logsAutoscroll} onChange={(event) => setLogsAutoscroll(event.target.checked)} />
+                <span>Autoscroll</span>
+              </label>
+              <button type="button" title="Clear Logs" aria-label="Clear Logs" onClick={() => updateActiveWorkspace((workspace) => ({ ...workspace, logs: [] }))}>
+                <Trash2 size={16} /> Clear Logs
+              </button>
+            </div>
           </div>
           <div className="logsList" ref={logsListRef}>
             {activeWorkspace.logs.length === 0 && <div className="emptyState">No logs yet.</div>}
@@ -681,6 +751,273 @@ export function App() {
           <RotateCcw size={16} /> Working
         </div>
       )}
+    </div>
+  );
+}
+
+function ScriptLogWindow({ params }: { params: globalThis.URLSearchParams }) {
+  const workspaceId = params.get("workspaceId") ?? "";
+  const attachedScriptId = params.get("attachedScriptId") ?? "";
+  const scriptName = params.get("scriptName") ?? "Script";
+  const workspaceTitle = params.get("workspaceTitle") ?? "Workspace";
+  const [executionId, setExecutionId] = useState(params.get("executionId") ?? createId("execution"));
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [started, setStarted] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [logsAutoscroll, setLogsAutoscroll] = useState(true);
+  const [error, setError] = useState("");
+  const logsListRef = useRef<HTMLDivElement | null>(null);
+  const logsEndRef = useRef<HTMLDivElement | null>(null);
+  const streamBuffersRef = useRef<Record<string, string>>({});
+  const runningRef = useRef(false);
+  const executionIdRef = useRef(executionId);
+
+  useEffect(() => {
+    if (!logsAutoscroll) {
+      return;
+    }
+    const logsList = logsListRef.current;
+    if (!logsList) {
+      return;
+    }
+    const frameId = window.requestAnimationFrame(() => {
+      logsList.scrollTop = logsList.scrollHeight;
+      logsEndRef.current?.scrollIntoView({ block: "end" });
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [logs, logsAutoscroll]);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
+    executionIdRef.current = executionId;
+  }, [executionId]);
+
+  useEffect(() => {
+    return () => {
+      if (runningRef.current) {
+        void cancelScript({ executionId: executionIdRef.current, workspaceId, attachedScriptId });
+      }
+    };
+    // This window is bound to immutable URL params.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!running) {
+      return;
+    }
+
+    let disposed = false;
+    let polling = false;
+
+    async function poll() {
+      if (disposed || polling) {
+        return;
+      }
+      polling = true;
+      try {
+        const events = await drainScriptEvents({ executionId, workspaceId, attachedScriptId });
+        for (const event of events) {
+          handleWindowExecutionEvent(event);
+        }
+      } catch (reason) {
+        const message = String(reason);
+        setError(`Log polling error: ${message}`);
+      } finally {
+        polling = false;
+      }
+    }
+
+    void poll();
+    const intervalId = window.setInterval(() => {
+      void poll();
+    }, 250);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
+    // Polling intentionally binds to immutable URL params and current running state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, executionId]);
+
+  function appendWindowLog(entry: Omit<LogEntry, "id" | "timestamp">) {
+    setLogs((current) =>
+      [
+        ...current,
+        {
+          ...entry,
+          id: createId("log"),
+          timestamp: nowIso()
+        }
+      ].slice(-MAX_LOGS_PER_WORKSPACE)
+    );
+  }
+
+  function appendOutputChunk(stream: "stdout" | "stderr", chunk: string) {
+    const key = `${executionId}:${stream}`;
+    const nextText = `${streamBuffersRef.current[key] ?? ""}${chunk}`;
+    const lines = nextText.split(/\r?\n/);
+    streamBuffersRef.current[key] = lines.pop() ?? "";
+
+    for (const line of lines.filter(Boolean)) {
+      appendWindowLog({
+        level: stream,
+        message: line,
+        scriptId: attachedScriptId,
+        executionId,
+        status: "running"
+      });
+    }
+  }
+
+  function flushStreamBuffer(stream: "stdout" | "stderr", status: LogEntry["status"]) {
+    const key = `${executionId}:${stream}`;
+    const pending = streamBuffersRef.current[key];
+    if (pending?.trim()) {
+      appendWindowLog({
+        level: stream,
+        message: pending,
+        scriptId: attachedScriptId,
+        executionId,
+        status
+      });
+    }
+    delete streamBuffersRef.current[key];
+  }
+
+  function handleWindowExecutionEvent(event: ScriptExecutionEvent) {
+    if (event.executionId !== executionId) {
+      return;
+    }
+
+    if (event.kind === "output" && event.stream && event.chunk) {
+      appendOutputChunk(event.stream, event.chunk);
+      return;
+    }
+
+    if (event.kind === "finished") {
+      const status = event.status ?? "failed";
+      flushStreamBuffer("stdout", status);
+      flushStreamBuffer("stderr", status);
+      appendWindowLog({
+        level: status === "success" ? "info" : status === "cancelled" ? "warn" : "error",
+        message: `${scriptName} finished with status ${status}${event.exitCode === undefined ? "" : ` and exit code ${event.exitCode}`}${event.message ? `: ${event.message}` : ""}`,
+        scriptId: attachedScriptId,
+        executionId,
+        status
+      });
+      setRunning(false);
+      setStopping(false);
+    }
+  }
+
+  async function startWindowExecution() {
+    if (running) {
+      return;
+    }
+
+    const nextExecutionId = createId("execution");
+    streamBuffersRef.current = {};
+    setExecutionId(nextExecutionId);
+    setStarted(true);
+    setRunning(true);
+    setStopping(false);
+    setError("");
+    appendWindowLog({
+      level: "info",
+      message: `starting ${scriptName}`,
+      scriptId: attachedScriptId,
+      executionId: nextExecutionId,
+      status: "starting"
+    });
+
+    try {
+      await runScript({ executionId: nextExecutionId, workspaceId, attachedScriptId });
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      setRunning(false);
+      appendWindowLog({
+        level: "error",
+        message,
+        scriptId: attachedScriptId,
+        executionId: nextExecutionId,
+        status: "failed"
+      });
+    }
+  }
+
+  async function stopWindowExecution() {
+    if (!running || stopping) {
+      return;
+    }
+    setStopping(true);
+    appendWindowLog({
+      level: "warn",
+      message: "stop requested",
+      scriptId: attachedScriptId,
+      executionId,
+      status: "cancelled"
+    });
+
+    try {
+      await cancelScript({ executionId, workspaceId, attachedScriptId });
+    } catch (reason) {
+      const message = String(reason);
+      setStopping(false);
+      setError(message);
+      appendWindowLog({
+        level: "error",
+        message,
+        scriptId: attachedScriptId,
+        executionId,
+        status: "failed"
+      });
+    }
+  }
+
+  return (
+    <div className="logWindowShell">
+      <header className="logWindowHeader">
+        <div>
+          <h1>{scriptName}</h1>
+          <span>{workspaceTitle}</span>
+        </div>
+        <div className="rowActions">
+          <label className="checkboxLine logAutoscrollToggle">
+            <input type="checkbox" checked={logsAutoscroll} onChange={(event) => setLogsAutoscroll(event.target.checked)} />
+            <span>Autoscroll</span>
+          </label>
+          <button type="button" className="primaryButton" title="Start" aria-label={`Start ${scriptName}`} disabled={running} onClick={startWindowExecution}>
+            <Play size={15} /> Start
+          </button>
+          <button type="button" className="dangerButton" disabled={!running || stopping} onClick={stopWindowExecution}>
+            <Square size={15} /> {stopping ? "Stopping" : "Stop"}
+          </button>
+          <button type="button" onClick={() => setLogs([])}>
+            <Trash2 size={15} /> Clear
+          </button>
+        </div>
+      </header>
+      {error && <div className="topError logWindowError">{error}</div>}
+      <section className="logsPanel logWindowLogs" aria-label="Script logs">
+        <div className="logsList" ref={logsListRef}>
+          {logs.length === 0 && <div className="emptyState">{started ? "Waiting for logs..." : "Ready to start."}</div>}
+          {logs.map((log) => (
+            <div className={`logLine ${log.level}`} key={log.id}>
+              <time>{new Date(log.timestamp).toLocaleTimeString()}</time>
+              <span>{log.level}</span>
+              <p>{log.message}</p>
+            </div>
+          ))}
+          <div className="logsEndAnchor" ref={logsEndRef} />
+        </div>
+      </section>
     </div>
   );
 }

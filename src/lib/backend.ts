@@ -62,14 +62,14 @@ export async function runScript(request: ExecutionRequest): Promise<ExecutionSta
   };
 }
 
-export async function cancelScript(request: Pick<ExecutionRequest, "workspaceId" | "attachedScriptId">): Promise<void> {
+export async function cancelScript(request: Pick<ExecutionRequest, "workspaceId" | "attachedScriptId" | "executionId">): Promise<void> {
   if (isTauriRuntime()) {
     await invoke("cancel_script", { request });
   }
 }
 
 export async function drainScriptEvents(
-  request: Pick<ExecutionRequest, "workspaceId" | "attachedScriptId">
+  request: Pick<ExecutionRequest, "workspaceId" | "attachedScriptId" | "executionId">
 ): Promise<ScriptExecutionEvent[]> {
   if (isTauriRuntime()) {
     return invoke("drain_script_events", { request });

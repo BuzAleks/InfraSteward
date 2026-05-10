@@ -95,6 +95,7 @@ export type PreparedCommand = {
 export type ExecutionRequest = {
   workspaceId: string;
   attachedScriptId: string;
+  executionId?: string;
   parameterOverrides?: Record<string, string>;
 };
 
@@ -111,6 +112,7 @@ export type ExecutionStart = {
 
 export type ScriptExecutionEvent = {
   kind: "output" | "finished";
+  executionId: string;
   workspaceId: string;
   attachedScriptId: string;
   stream?: "stdout" | "stderr";
