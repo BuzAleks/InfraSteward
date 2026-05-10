@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { createDefaultAppData, normalizeAppData } from "./appData";
-import type { AppData, ConnectionSaveRequest, ExecutionRequest, ExecutionResult } from "./types";
+import type { AppData, ConnectionSaveRequest, ExecutionRequest, ExecutionStart, ScriptExecutionEvent } from "./types";
 
 const LOCAL_STORAGE_KEY = "infrasteward.appData";
 
@@ -53,14 +53,65 @@ export async function testConnection(workspaceId: string): Promise<string> {
   return `Connection test requires the Tauri desktop runtime. Workspace ${workspaceId} is in web preview mode.`;
 }
 
-export async function runScript(request: ExecutionRequest): Promise<ExecutionResult> {
+export async function runScript(request: ExecutionRequest): Promise<ExecutionStart> {
   if (isTauriRuntime()) {
     return invoke("run_script", { request });
   }
   return {
-    status: "failed",
-    stdout: "",
-    stderr: "Remote SSH execution requires the Tauri desktop runtime.",
-    exitCode: 1
+    executionId: `${request.workspaceId}:${request.attachedScriptId}`
   };
+}
+
+export async function cancelScript(request: Pick<ExecutionRequest, "workspaceId" | "attachedScriptId" | "executionId">): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke("cancel_script", { request });
+  }
+}
+
+export async function drainScriptEvents(
+  request: Pick<ExecutionRequest, "workspaceId" | "attachedScriptId" | "executionId">
+): Promise<ScriptExecutionEvent[]> {
+  if (isTauriRuntime()) {
+    return invoke("drain_script_events", { request });
+  }
+  return [];
+}
+
+export async function logSystemEvent(event: {
+  level: "info" | "warn" | "error";
+  message: string;
+  target?: string;
+  details?: string;
+}): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
+  try {
+    await invoke("log_system_event", { event });
+  } catch {
+    // Logging must never become the reason the app fails.
+  }
+}
+
+export type RuntimeInfo = {
+  workingDataDir: string;
+  systemLogPath: string;
+};
+
+export async function getRuntimeInfo(): Promise<RuntimeInfo> {
+  if (isTauriRuntime()) {
+    return invoke("get_runtime_info");
+  }
+
+  return {
+    workingDataDir: "Browser localStorage preview",
+    systemLogPath: "Browser console"
+  };
+}
+
+export async function openWorkingDataDir(): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke("open_working_data_dir");
+  }
 }

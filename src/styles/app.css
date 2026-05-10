@@ -13,7 +13,13 @@
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+  min-height: 0;
 }
 
 button,
@@ -63,9 +69,11 @@ textarea {
 }
 
 .appShell {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .tabStrip {
@@ -111,8 +119,9 @@ textarea {
 .mainPane {
   flex: 1;
   display: grid;
-  grid-template-rows: auto minmax(260px, 1fr) 220px;
+  grid-template-rows: auto minmax(0, 1fr) 8px minmax(0, var(--logs-panel-height, 260px));
   min-height: 0;
+  overflow: hidden;
 }
 
 .toolbar {
@@ -122,6 +131,40 @@ textarea {
   padding: 10px 14px;
   background: #ffffff;
   border-bottom: 1px solid #d8dee7;
+}
+
+.runtimePath {
+  min-width: 220px;
+  max-width: min(520px, 45vw);
+  margin-left: auto;
+  min-height: 0;
+  display: grid;
+  gap: 2px;
+  padding: 2px 8px;
+  text-align: left;
+  color: #5c6b7a;
+  border-color: transparent;
+  background: transparent;
+}
+
+.runtimePath span {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.runtimePath code {
+  color: #17202a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtimePath:hover:not(:disabled),
+.runtimePath:focus-visible {
+  background: #f2f5f8;
+  border-color: #c7d0db;
+  outline: none;
 }
 
 .topError,
@@ -136,7 +179,9 @@ textarea {
 .scriptsPanel {
   padding: 14px;
   min-height: 0;
-  overflow: auto;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .sectionHeading {
@@ -160,6 +205,15 @@ textarea {
 .scriptCatalog {
   display: grid;
   gap: 8px;
+  align-content: start;
+  grid-auto-rows: max-content;
+}
+
+.scriptsPanel .scriptRows {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  align-items: start;
 }
 
 .scriptRow,
@@ -171,6 +225,11 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.scriptRow {
+  padding: 5px 8px;
+  gap: 8px;
 }
 
 .scriptRow.selected {
@@ -185,6 +244,18 @@ textarea {
   gap: 3px;
   min-width: 0;
   flex: 1;
+}
+
+.scriptSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scriptSummary strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .scriptSummary span,
@@ -204,7 +275,8 @@ textarea {
 .listControls,
 .modalActions,
 .managerToolbar,
-.logsHeader {
+.logsHeader,
+.logsHeaderActions {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -212,6 +284,18 @@ textarea {
 
 .rowActions {
   margin-left: auto;
+}
+
+.scriptRow .rowActions {
+  gap: 4px;
+}
+
+.scriptRow .rowActions button {
+  width: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  justify-content: center;
 }
 
 .listControls {
@@ -235,17 +319,136 @@ textarea {
 
 .logsPanel {
   min-height: 0;
-  border-top: 1px solid #c7d0db;
   background: #111827;
   color: #d9e2ec;
   display: grid;
   grid-template-rows: auto 1fr;
+  overflow: hidden;
+}
+
+.logWindowShell {
+  height: 100vh;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  background: #111827;
+  overflow: hidden;
+}
+
+.logWindowHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  background: #ffffff;
+  border-bottom: 1px solid #d8dee7;
+}
+
+.logWindowHeader h1 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.logWindowHeader span {
+  color: #5c6b7a;
+}
+
+.logWindowError {
+  margin: 10px 12px;
+}
+
+.logWindowLogs {
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.logWindowLogs .logsList {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  scroll-behavior: auto;
+}
+
+.logsEndAnchor {
+  height: 1px;
+}
+
+.panelResizeHandle {
+  min-height: 8px;
+  background: #d8dee7;
+  border-top: 1px solid #c7d0db;
+  border-bottom: 1px solid #c7d0db;
+  cursor: row-resize;
+  position: relative;
+}
+
+.panelResizeHandle::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 2px;
+  border-radius: 999px;
+  background: #8090a3;
+  transform: translate(-50%, -50%);
+}
+
+.panelResizeHandle:hover,
+.panelResizeHandle:focus-visible {
+  background: #c9d4e2;
+  outline: none;
 }
 
 .logsHeader {
   padding: 8px 12px;
-  justify-content: space-between;
+  justify-content: flex-start;
   border-bottom: 1px solid #263244;
+  flex-wrap: wrap;
+}
+
+.logsHeaderActions {
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.logAutoscrollToggle {
+  color: #d9e2ec;
+  user-select: none;
+}
+
+.logWindowHeader .rowActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.logWindowHeader .logAutoscrollToggle,
+.logWindowHeader .levelFilter {
+  color: #17202a;
+}
+
+.logLevelFilters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-right: 8px;
+}
+
+.levelFilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #d9e2ec;
+  font-size: 12px;
+  user-select: none;
+}
+
+.levelFilter input {
+  width: auto;
 }
 
 .logsHeader h2 {
@@ -261,6 +464,7 @@ textarea {
   padding: 8px 12px;
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   font-size: 13px;
+  user-select: text;
 }
 
 .logLine {
@@ -275,6 +479,12 @@ textarea {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
+}
+
+.logLine time,
+.logLine > span {
+  user-select: none;
 }
 
 .logLine.stdout p {
@@ -429,6 +639,11 @@ textarea {
     grid-template-columns: 1fr;
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .runtimePath {
+    max-width: 100%;
+    margin-left: 0;
   }
 
   .rowActions,

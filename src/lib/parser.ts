@@ -27,15 +27,19 @@ export function extractScriptVariables(content: string): string[] {
     }
 
     const variable = match[0];
-    if (!seen.has(variable)) {
-      seen.add(variable);
-      variables.push(variable);
-    }
+    addVariable(variable, variables, seen);
 
     index = expressionEnd;
   }
 
   return variables;
+}
+
+function addVariable(variable: string, variables: string[], seen: Set<string>): void {
+  if (!seen.has(variable)) {
+    seen.add(variable);
+    variables.push(variable);
+  }
 }
 
 function isEscaped(content: string, dollarIndex: number): boolean {

@@ -95,6 +95,7 @@ export type PreparedCommand = {
 export type ExecutionRequest = {
   workspaceId: string;
   attachedScriptId: string;
+  executionId?: string;
   parameterOverrides?: Record<string, string>;
 };
 
@@ -103,6 +104,22 @@ export type ExecutionResult = {
   stdout: string;
   stderr: string;
   exitCode?: number;
+};
+
+export type ExecutionStart = {
+  executionId: string;
+};
+
+export type ScriptExecutionEvent = {
+  kind: "output" | "finished";
+  executionId: string;
+  workspaceId: string;
+  attachedScriptId: string;
+  stream?: "stdout" | "stderr";
+  chunk?: string;
+  status?: ExecutionStatus;
+  exitCode?: number;
+  message?: string;
 };
 
 export type McpToolDefinition = {
