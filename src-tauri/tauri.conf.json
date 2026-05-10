@@ -26,6 +26,6 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "dmg", "appimage", "deb"],
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }
