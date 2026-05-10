@@ -1,0 +1,84 @@
+name: Release Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "release/**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-info:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      name: ${{ steps.meta.outputs.name }}
+      body: ${{ steps.meta.outputs.body }}
+    steps:
+      - name: Generate release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            BRANCH="${GITHUB_REF_NAME#release/}"
+            SLUG="$(echo "${BRANCH}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+            if [[ -z "${SLUG}" ]]; then
+              SLUG="branch"
+            fi
+            SHORT_SHA="${GITHUB_SHA::7}"
+            TAG="release-${SLUG}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "name=InfraSteward ${TAG}"
+            echo "body<<EOF"
+            echo "Automated InfraSteward release for \`${GITHUB_REF_NAME}\`."
+            echo ""
+            echo "Commit: \`${GITHUB_SHA}\`"
+            echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: release-info
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: ""
+          - platform: ubuntu-latest
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux Tauri dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+          tagName: ${{ needs.release-info.outputs.tag }}
+          releaseName: ${{ needs.release-info.outputs.name }}
+          releaseBody: ${{ needs.release-info.outputs.body }}
+          releaseDraft: false
+          prerelease: false

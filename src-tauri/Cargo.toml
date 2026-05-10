@@ -1,0 +1,28 @@
+[package]
+name = "infrasteward"
+version = "0.1.0"
+description = "InfraSteward personal DevOps assistant"
+authors = ["InfraSteward Contributors"]
+edition = "2021"
+
+[lib]
+name = "infrasteward_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.1", features = [] }
+
+[dependencies]
+dirs = "5.0"
+keyring = "3.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ssh2 = "0.9"
+tauri = { version = "2.2", features = [] }
+tempfile = "3.14"
+thiserror = "2.0"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
