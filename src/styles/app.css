@@ -539,16 +539,36 @@ textarea {
 }
 
 .formGrid,
-.inlineEditor {
+.inlineEditor,
+.scriptEditorScreen {
   display: grid;
   gap: 12px;
 }
 
 .formGrid label,
-.inlineEditor label {
+.inlineEditor label,
+.scriptEditorScreen label {
   display: grid;
   gap: 5px;
   font-weight: 600;
+}
+
+.editorToolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.editorToolbar h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.fieldError {
+  color: #8a1f11;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .checkboxLine {
