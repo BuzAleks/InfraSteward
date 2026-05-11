@@ -101,6 +101,8 @@ pub struct WorkspaceTab {
 pub struct AttachedScript {
     id: String,
     global_script_id: String,
+    #[serde(default = "default_script_tag")]
+    tag: String,
     parameter_settings: HashMap<String, ScriptParameterSetting>,
     use_in_mcp: bool,
     selected: Option<bool>,
@@ -1095,6 +1097,13 @@ fn normalize_app_data(mut data: AppData) -> AppData {
         data.active_tab_id = data.workspaces[0].id.clone();
     }
     for workspace in &mut data.workspaces {
+        for attached in &mut workspace.attached_scripts {
+            if attached.tag.trim().is_empty() {
+                attached.tag = default_script_tag();
+            } else {
+                attached.tag = attached.tag.trim().into();
+            }
+        }
         if workspace.logs.len() > MAX_LOGS_PER_WORKSPACE {
             workspace.logs = workspace
                 .logs
@@ -1102,6 +1111,10 @@ fn normalize_app_data(mut data: AppData) -> AppData {
         }
     }
     data
+}
+
+fn default_script_tag() -> String {
+    "default".into()
 }
 
 fn default_app_data() -> AppData {
@@ -1677,12 +1690,17 @@ fn create_mcp_tool_definitions(data: &AppData) -> Vec<McpToolDefinition> {
                     ),
                 },
             );
+            let script_tag = if attached.tag.trim().is_empty() {
+                "default"
+            } else {
+                attached.tag.trim()
+            };
             drafts.push((
-                to_tool_slug(&format!("{connection_name}_{}", script.name)),
+                to_tool_slug(&format!("{connection_name}_{}_{}", script.name, script_tag)),
                 McpToolDefinition {
                     name: String::new(),
                     description: if script.description.is_empty() {
-                        format!("Run {} on {connection_name}.", script.name)
+                        format!("Run {} ({script_tag}) on {connection_name}.", script.name)
                     } else {
                         script.description.clone()
                     },

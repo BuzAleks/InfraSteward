@@ -10,11 +10,13 @@ Open `Connection Settings` to configure host, port, username, authentication typ
 
 Open `Script Manager` to create, edit, search, and delete global scripts. Deleting a script leaves existing tab attachments as missing references so the workspace can recover if a script is recreated.
 
-Use `Add` below the script list to attach global scripts to the active tab. Select rows and use `Remove` to detach them from the current tab only.
+Use `Add` below the script list to attach global scripts to the active tab. Press the plus button next to a script to attach it immediately. The first copy of a script uses tag `default`; additional copies ask for a tag. Tags must be unique for that script within the workspace, and each tagged attachment has independent parameter and MCP settings. Select rows and use `Remove` to detach them from the current tab only.
 
-Open a script row's settings to configure detected `${VAR}` parameters. Enable `Use from environment` when the remote server should resolve the variable itself. Enable `Use in MCP` only for scripts you trust.
+Open a script row's settings to edit its tag and configure detected `${VAR}` parameters. Enable `Use from environment` when the remote server should resolve the variable itself. Enable `Use in MCP` only for scripts you trust.
 
-Use the run button to execute a script on the active tab's SSH server. While a script runs, other main-window script start buttons are blocked. Use the stop button to request cancellation.
+Drag script rows by the handle on the left to change their order within the workspace. Use the run button on a row to execute one script on the active tab's SSH server. While a script runs, other main-window script start buttons and reordering are blocked. Use the stop button to request cancellation.
+
+Use the bottom Play button to run checked scripts sequentially in the current list order. If you stop the active script, the remaining queued scripts are cleared.
 
 Use the new-window run button to open an independent log window for a script. The script does not start until you press Start in that window, and separate log windows can run in parallel.
 

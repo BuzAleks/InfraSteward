@@ -33,6 +33,7 @@ describe("createMcpRegistry", () => {
             {
               id: "attached_1",
               globalScriptId: "script_1",
+              tag: "default",
               parameterSettings: {},
               useInMcp: true
             }
@@ -49,7 +50,7 @@ describe("createMcpRegistry", () => {
       exitCode: 0
     }));
 
-    expect(registry[0].name).toBe("prod_check_logs");
+    expect(registry[0].name).toBe("prod_check_logs_default");
     await expect(registry[0].execute({ SERVICE: "nginx" })).resolves.toMatchObject({
       stdout: "workspace_1:attached_1:nginx"
     });

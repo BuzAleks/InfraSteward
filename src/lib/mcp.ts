@@ -42,9 +42,10 @@ export function createMcpToolDefinitions(appData: AppData): McpToolDefinition[] 
         description: `MCP execution timeout in seconds, from 1 to ${MCP_MAX_TIMEOUT_SECONDS}. Defaults to ${MCP_DEFAULT_TIMEOUT_SECONDS}.`
       };
 
+      const scriptTag = attached.tag.trim() || "default";
       tools.push({
-        baseName: toToolSlug(`${connectionName}_${script.name}`) || `script_${script.id}`,
-        description: script.description || `Run ${script.name} on ${connectionName}.`,
+        baseName: toToolSlug(`${connectionName}_${script.name}_${scriptTag}`) || `script_${script.id}_${scriptTag}`,
+        description: script.description || `Run ${script.name} (${scriptTag}) on ${connectionName}.`,
         workspaceId: workspace.id,
         workspaceTitle: connectionName,
         attachedScriptId: attached.id,

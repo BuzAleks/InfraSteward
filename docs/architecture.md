@@ -4,6 +4,10 @@ InfraSteward uses Tauri 2, React, TypeScript, and Rust as required.
 
 The frontend is a Vite React app in `src/`. It owns the tabbed workspace UI, modal workflows, script manager, parameter settings, and logs panel. Shared TypeScript domain logic lives in `src/lib/` so tests can cover script parsing, command construction, persistence normalization, and MCP tool generation without a desktop runtime.
 
+Global scripts are stored once, while workspaces store tagged attachments to those scripts. Multiple attachments can point to the same global script; each attachment has its own tag, parameter settings, and MCP flag.
+
+Workspace attachment order is user-controlled and persisted as the `attachedScripts` array order. The main window runs one script at a time; selected attachments can be queued and are executed sequentially in that order.
+
 The backend is a Tauri Rust crate in `src-tauri/`. It exposes commands for app-data loading/saving, SSH connection saving, connection testing, runtime path discovery, working-directory opening, MCP bridge control, and remote script execution. Non-secret data is stored as JSON in the configured working data directory. Writes use a temporary file followed by rename.
 
 The working data directory is resolved from `INFRASTEWARD_DATA_DIR`, then on Windows from `HKCU\Software\InfraSteward\WorkingDataDir`, then from `data-dir.txt` in the app config directory, and finally from Tauri's standard app data directory. The Windows NSIS installer prompts for this directory and writes the registry value.

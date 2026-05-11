@@ -10,6 +10,8 @@ Default locations, when no override is configured:
 
 The root object contains `schemaVersion`, `activeTabId`, `globalScripts`, and `workspaces`.
 
+Each workspace stores `attachedScripts`. An attachment references a global script by `globalScriptId`, has its own unique-per-script `tag` inside that workspace, and owns independent `parameterSettings` and `useInMcp` values. Legacy attachments without a tag are normalized to `default`.
+
 Secrets are stored as references such as `conn_x:password`, `conn_x:private-key`, and `conn_x:passphrase`. Secret values are kept in secure OS storage where available. If insecure fallback is explicitly allowed, values are stored in `insecure-secrets.json` in the same working data directory.
 
 Logs are persisted with workspaces and capped at 500 entries per workspace.

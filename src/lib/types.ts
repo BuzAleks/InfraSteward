@@ -29,6 +29,7 @@ export type ScriptParameterSetting = {
 export type AttachedScript = {
   id: string;
   globalScriptId: string;
+  tag: string;
   parameterSettings: Record<string, ScriptParameterSetting>;
   useInMcp: boolean;
   selected?: boolean;

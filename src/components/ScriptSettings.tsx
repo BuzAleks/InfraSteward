@@ -5,25 +5,54 @@ import type { AttachedScript, GlobalScript, ScriptParameterSetting } from "../li
 type Props = {
   script: GlobalScript;
   attached: AttachedScript;
+  workspaceAttachedScripts: AttachedScript[];
   onCancel: () => void;
   onSave: (attached: AttachedScript) => void;
 };
 
-export function ScriptSettings({ script, attached, onSave, onCancel }: Props) {
+export function ScriptSettings({ script, attached, workspaceAttachedScripts, onSave, onCancel }: Props) {
   const variables = useMemo(() => extractScriptVariables(script.content), [script.content]);
   const [settings, setSettings] = useState<Record<string, ScriptParameterSetting>>(attached.parameterSettings);
   const [useInMcp, setUseInMcp] = useState(attached.useInMcp);
+  const [tag, setTag] = useState(attached.tag.trim() || "default");
+  const [error, setError] = useState("");
 
   function updateParameter(name: string, setting: ScriptParameterSetting) {
     setSettings((current) => ({ ...current, [name]: setting }));
   }
 
   function save() {
-    onSave({ ...attached, parameterSettings: settings, useInMcp });
+    const normalizedTag = tag.trim();
+    if (!normalizedTag) {
+      setError("Tag is required.");
+      return;
+    }
+    const duplicate = workspaceAttachedScripts.some(
+      (candidate) =>
+        candidate.id !== attached.id &&
+        candidate.globalScriptId === attached.globalScriptId &&
+        candidate.tag.trim().toLowerCase() === normalizedTag.toLowerCase()
+    );
+    if (duplicate) {
+      setError("Tag must be unique for this script in the workspace.");
+      return;
+    }
+    onSave({ ...attached, tag: normalizedTag, parameterSettings: settings, useInMcp });
   }
 
   return (
     <div className="formGrid">
+      <label>
+        Tag
+        <input
+          value={tag}
+          onChange={(event) => {
+            setTag(event.target.value);
+            setError("");
+          }}
+        />
+      </label>
+      {error && <div className="errorBox">{error}</div>}
       {variables.length === 0 ? (
         <p className="emptyState">This script has no detected parameters.</p>
       ) : (

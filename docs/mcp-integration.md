@@ -4,7 +4,7 @@ MCP lets an LLM client call selected InfraSteward scripts as tools. This is dang
 
 MCP is disabled by default for every attached script. Enable `Use in MCP` from a script settings dialog only after reviewing the script and target server.
 
-Tool names are generated from connection name and script name, normalized to lowercase snake case. Collisions receive a deterministic suffix based on the attached script id.
+Tool names are generated from connection name, script name, and attachment tag, normalized to lowercase snake case. For example, connection `REG.RU`, script `LOGS`, and tag `default` becomes `reg_ru_logs_default`. Collisions still receive a deterministic suffix based on the attached script id.
 
 Tool input schemas are generated from detected script variables. Each variable is an optional string so omitted values can fall back to the remote environment or shell defaults.
 

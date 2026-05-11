@@ -26,4 +26,20 @@ describe("normalizeAppData", () => {
 
     expect(normalizeAppData(data).workspaces[0].logs).toHaveLength(500);
   });
+
+  it("adds default tags to legacy attachments", () => {
+    const data = createDefaultAppData();
+    data.globalScripts[0].id = "script_1";
+    data.workspaces[0].attachedScripts = [
+      {
+        id: "attached_1",
+        globalScriptId: "script_1",
+        tag: "",
+        parameterSettings: {},
+        useInMcp: false
+      }
+    ];
+
+    expect(normalizeAppData(data).workspaces[0].attachedScripts[0].tag).toBe("default");
+  });
 });

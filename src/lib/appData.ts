@@ -3,6 +3,7 @@ import type { AppData, GlobalScript, SshConnectionConfig, WorkspaceTab } from ".
 
 export const CURRENT_SCHEMA_VERSION = 1;
 export const MAX_LOGS_PER_WORKSPACE = 500;
+export const DEFAULT_SCRIPT_TAG = "default";
 
 export function createDefaultConnection(): SshConnectionConfig {
   return {
@@ -68,6 +69,10 @@ export function normalizeAppData(input: unknown): AppData {
     globalScripts: globalScripts.filter(isGlobalScript),
     workspaces: workspaces.filter(isWorkspace).map((workspace) => ({
       ...workspace,
+      attachedScripts: workspace.attachedScripts.map((attached) => ({
+        ...attached,
+        tag: normalizeScriptTag(attached.tag)
+      })),
       logs: workspace.logs.slice(-MAX_LOGS_PER_WORKSPACE)
     }))
   };
@@ -83,6 +88,14 @@ export function normalizeAppData(input: unknown): AppData {
   }
 
   return normalized;
+}
+
+export function normalizeScriptTag(value: unknown): string {
+  if (typeof value !== "string") {
+    return DEFAULT_SCRIPT_TAG;
+  }
+  const trimmed = value.trim();
+  return trimmed || DEFAULT_SCRIPT_TAG;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
