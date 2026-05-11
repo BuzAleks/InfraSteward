@@ -133,6 +133,10 @@ textarea {
   border-bottom: 1px solid #d8dee7;
 }
 
+.mcpToggle[aria-pressed="false"] {
+  color: #415364;
+}
+
 .runtimePath {
   min-width: 220px;
   max-width: min(520px, 45vw);
@@ -174,6 +178,35 @@ textarea {
   border: 1px solid #f0b3a7;
   border-radius: 6px;
   padding: 8px 10px;
+}
+
+.connectionTestResult {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border-radius: 6px;
+  padding: 9px 10px;
+}
+
+.connectionTestResult.success {
+  color: #115c2f;
+  background: #eaf8ef;
+  border: 1px solid #8bc9a0;
+}
+
+.connectionTestResult.error {
+  color: #8a1f11;
+  background: #fff0ec;
+  border: 1px solid #f0b3a7;
+}
+
+.connectionTestResult div {
+  display: grid;
+  gap: 2px;
+}
+
+.connectionTestResult span {
+  color: inherit;
 }
 
 .scriptsPanel {

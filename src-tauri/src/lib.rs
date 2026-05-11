@@ -4,19 +4,29 @@ use std::{
     collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     panic,
     path::{Path, PathBuf},
     process::Command,
+    ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
 use tauri::{AppHandle, Manager, State};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{GetLastError, ERROR_NOT_FOUND, FILETIME},
+    Security::Credentials::{
+        CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    },
+};
 #[cfg(windows)]
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
@@ -26,14 +36,34 @@ const MAX_SYSTEM_LOG_BYTES: u64 = 2 * 1024 * 1024;
 const SERVICE_NAME: &str = "InfraSteward";
 const DATA_DIR_ENV_VAR: &str = "INFRASTEWARD_DATA_DIR";
 const DATA_DIR_OVERRIDE_FILE: &str = "data-dir.txt";
+const MCP_BRIDGE_PORT: u16 = 47321;
+const MCP_TIMEOUT_PARAMETER: &str = "timeoutSeconds";
+const MCP_DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+const MCP_MAX_TIMEOUT_SECONDS: u64 = 60;
 
 type SharedAppData = Mutex<AppData>;
 type ActiveExecutions = Mutex<HashMap<String, ActiveExecution>>;
+type McpBridgeState = Mutex<Option<McpBridgeServer>>;
 
 struct ActiveExecution {
     cancel_flag: Arc<AtomicBool>,
     events: Arc<Mutex<VecDeque<ScriptExecutionEvent>>>,
     finished: Arc<AtomicBool>,
+}
+
+struct McpBridgeServer {
+    port: u16,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for McpBridgeServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -200,6 +230,48 @@ pub struct RuntimeInfo {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    running: bool,
+    url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolDefinition {
+    name: String,
+    description: String,
+    workspace_id: String,
+    workspace_title: String,
+    attached_script_id: String,
+    global_script_id: String,
+    input_schema: McpInputSchema,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInputSchema {
+    r#type: String,
+    properties: HashMap<String, McpInputProperty>,
+    additional_properties: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInputProperty {
+    r#type: String,
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpBridgeExecuteRequest {
+    workspace_id: String,
+    attached_script_id: String,
+    args: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SystemLogRecord<'a> {
     timestamp_ms: u128,
     level: &'a str,
@@ -283,14 +355,16 @@ fn save_connection(
         .lock()
         .map_err(|err| InfraError::Storage(err.to_string()))?
         .clone();
+    validate_connection(&request.connection)?;
+    validate_unique_connection_name(&data, &request.workspace_id, &request.connection.name)?;
     let workspace = data
         .workspaces
         .iter_mut()
         .find(|workspace| workspace.id == request.workspace_id)
         .ok_or(InfraError::MissingWorkspace)?;
 
-    validate_connection(&request.connection)?;
     let mut connection = request.connection;
+    connection.name = connection.name.trim().into();
     let secret_store = SecretStore::new(&app);
 
     if let Some(password) = request.secrets.password.filter(|value| !value.is_empty()) {
@@ -334,6 +408,7 @@ fn save_connection(
         connection.passphrase_ref = Some(reference);
     }
 
+    workspace.title = connection.name.clone();
     workspace.connection = connection;
     write_app_data(&app, &data)?;
     *state
@@ -639,6 +714,37 @@ fn get_runtime_info(app: AppHandle) -> Result<RuntimeInfo, InfraError> {
 }
 
 #[tauri::command]
+fn get_mcp_server_status(state: State<'_, McpBridgeState>) -> Result<McpServerStatus, InfraError> {
+    let server = state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))?;
+    Ok(mcp_server_status(server.as_ref()))
+}
+
+#[tauri::command]
+fn start_mcp_server(
+    app: AppHandle,
+    state: State<'_, McpBridgeState>,
+) -> Result<McpServerStatus, InfraError> {
+    let mut server = state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))?;
+    if server.is_none() {
+        *server = Some(start_mcp_bridge(app)?);
+    }
+    Ok(mcp_server_status(server.as_ref()))
+}
+
+#[tauri::command]
+fn stop_mcp_server(state: State<'_, McpBridgeState>) -> Result<McpServerStatus, InfraError> {
+    let mut server = state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))?;
+    *server = None;
+    Ok(mcp_server_status(None))
+}
+
+#[tauri::command]
 fn open_working_data_dir(app: AppHandle) -> Result<(), InfraError> {
     let directory = working_data_dir(&app)?;
     open_directory(&directory).map_err(|err| InfraError::Storage(err.to_string()))?;
@@ -776,10 +882,17 @@ fn execute_ssh_command(
         if Instant::now() >= deadline {
             let _ = channel.close();
             session.set_blocking(true);
-            return Err(InfraError::Ssh(format!(
-                "Script timed out after {} seconds.",
-                timeout.as_secs()
-            )));
+            let timeout_message = format!("Script timed out after {} seconds.", timeout.as_secs());
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&timeout_message);
+            return Ok(ExecutionResult {
+                status: "timeout".into(),
+                stdout,
+                stderr,
+                exit_code: None,
+            });
         }
 
         let mut read_any = false;
@@ -909,6 +1022,11 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 fn validate_connection(connection: &SshConnectionConfig) -> Result<(), InfraError> {
+    if connection.name.trim().is_empty() {
+        return Err(InfraError::Validation(
+            "Connection name is required.".into(),
+        ));
+    }
     if connection.host.trim().is_empty() {
         return Err(InfraError::Validation("Host is required.".into()));
     }
@@ -921,6 +1039,33 @@ fn validate_connection(connection: &SshConnectionConfig) -> Result<(), InfraErro
         ));
     }
     Ok(())
+}
+
+fn validate_unique_connection_name(
+    data: &AppData,
+    workspace_id: &str,
+    connection_name: &str,
+) -> Result<(), InfraError> {
+    let normalized = normalize_connection_name(connection_name);
+    if normalized.is_empty() {
+        return Err(InfraError::Validation(
+            "Connection name is required.".into(),
+        ));
+    }
+    let duplicate = data.workspaces.iter().any(|workspace| {
+        workspace.id != workspace_id
+            && normalize_connection_name(&workspace.connection.name) == normalized
+    });
+    if duplicate {
+        return Err(InfraError::Validation(
+            "Connection name must be unique.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_connection_name(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn find_workspace<'a>(
@@ -979,7 +1124,7 @@ fn default_app_data() -> AppData {
 fn default_workspace() -> WorkspaceTab {
     WorkspaceTab {
         id: format!("workspace_{}", Uuid::new_v4()),
-        title: "Local Server".into(),
+        title: "New Workspace".into(),
         connection: SshConnectionConfig {
             id: format!("conn_{}", Uuid::new_v4()),
             name: String::new(),
@@ -1215,6 +1360,460 @@ fn open_directory(path: &Path) -> std::io::Result<()> {
     }
 }
 
+fn mcp_server_status(server: Option<&McpBridgeServer>) -> McpServerStatus {
+    McpServerStatus {
+        running: server.is_some(),
+        url: server.map(|server| format!("http://127.0.0.1:{}", server.port)),
+    }
+}
+
+fn start_mcp_bridge(app: AppHandle) -> Result<McpBridgeServer, InfraError> {
+    let listener = TcpListener::bind(("127.0.0.1", MCP_BRIDGE_PORT))
+        .map_err(|err| InfraError::Storage(format!("Failed to start MCP server: {err}")))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| InfraError::Storage(err.to_string()))?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread_shutdown = shutdown.clone();
+    let thread_app = app.clone();
+    let handle = thread::spawn(move || {
+        while !thread_shutdown.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request_app = thread_app.clone();
+                    thread::spawn(move || {
+                        let _ = handle_mcp_bridge_request(&request_app, &mut stream);
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => {
+                    write_system_log(
+                        &thread_app,
+                        "error",
+                        "mcp",
+                        "MCP server accept failed.",
+                        Some(err.to_string()),
+                    );
+                    break;
+                }
+            }
+        }
+    });
+    write_system_log(
+        &app,
+        "info",
+        "mcp",
+        "MCP server started.",
+        Some(format!("url=http://127.0.0.1:{MCP_BRIDGE_PORT}")),
+    );
+    Ok(McpBridgeServer {
+        port: MCP_BRIDGE_PORT,
+        shutdown,
+        handle: Some(handle),
+    })
+}
+
+fn handle_mcp_bridge_request(app: &AppHandle, stream: &mut TcpStream) -> std::io::Result<()> {
+    let request = read_http_request(stream)?;
+    let response = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/health") => http_json_response(
+            200,
+            &serde_json::json!({
+                "status": "running",
+                "name": "infrasteward",
+                "version": "0.1.0"
+            }),
+        ),
+        ("GET", "/tools") => match read_shared_app_data(app) {
+            Ok(data) => http_json_response(200, &create_mcp_tool_definitions(&data)),
+            Err(err) => http_error_response(500, &err.to_string()),
+        },
+        ("POST", "/execute") => {
+            match serde_json::from_slice::<McpBridgeExecuteRequest>(&request.body) {
+                Ok(request) => match execute_mcp_bridge_script(app, request) {
+                    Ok(result) => http_json_response(200, &result),
+                    Err(err) => http_error_response(500, &err.to_string()),
+                },
+                Err(err) => http_error_response(400, &format!("Invalid execute request: {err}")),
+            }
+        }
+        _ => http_error_response(404, "Not found"),
+    };
+    stream.write_all(response.as_bytes())
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let header_end;
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "HTTP request ended before headers.",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(position) = find_header_end(&buffer) {
+            header_end = position;
+            break;
+        }
+        if buffer.len() > 64 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP headers are too large.",
+            ));
+        }
+    }
+
+    let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = header_text.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default().to_string();
+    let path = request_parts
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let content_length = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    let body = buffer
+        .get(body_start..body_start + content_length)
+        .unwrap_or_default()
+        .to_vec();
+
+    Ok(HttpRequest { method, path, body })
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn http_json_response<T: Serialize>(status: u16, value: &T) -> String {
+    let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".into());
+    http_response(status, "application/json", &body)
+}
+
+fn http_error_response(status: u16, message: &str) -> String {
+    http_json_response(
+        status,
+        &serde_json::json!({
+            "error": message
+        }),
+    )
+}
+
+fn http_response(status: u16, content_type: &str, body: &str) -> String {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.as_bytes().len()
+    )
+}
+
+fn read_shared_app_data(app: &AppHandle) -> Result<AppData, InfraError> {
+    let state = app.state::<SharedAppData>();
+    let data = state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))?
+        .clone();
+    Ok(data)
+}
+
+fn execute_mcp_bridge_script(
+    app: &AppHandle,
+    request: McpBridgeExecuteRequest,
+) -> Result<ExecutionResult, InfraError> {
+    let data = read_shared_app_data(app)?;
+    let workspace = find_workspace(&data, &request.workspace_id)?.clone();
+    let attached = workspace
+        .attached_scripts
+        .iter()
+        .find(|attached| attached.id == request.attached_script_id)
+        .ok_or(InfraError::MissingAttachment)?;
+    if !attached.use_in_mcp {
+        return Err(InfraError::Validation(
+            "This script is not enabled for MCP.".into(),
+        ));
+    }
+    let script = data
+        .global_scripts
+        .iter()
+        .find(|script| script.id == attached.global_script_id)
+        .ok_or(InfraError::MissingScript)?;
+    let mut args = request.args.unwrap_or_default();
+    let timeout_seconds = parse_mcp_timeout_seconds(args.remove(MCP_TIMEOUT_PARAMETER))?;
+    let mut settings = attached.parameter_settings.clone();
+    for (key, value) in args {
+        settings.insert(
+            key,
+            ScriptParameterSetting {
+                value: mcp_arg_to_string(value),
+                use_from_environment: false,
+            },
+        );
+    }
+    let command = prepare_remote_command(&script.content, &settings);
+    let mut connection = workspace.connection.clone();
+    connection.execution_timeout_seconds = Some(timeout_seconds);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let events = Arc::new(Mutex::new(VecDeque::new()));
+    execute_ssh_command(
+        app,
+        &connection,
+        &format!("mcp_{}", Uuid::new_v4()),
+        &request.workspace_id,
+        &request.attached_script_id,
+        &command,
+        &cancel_flag,
+        &events,
+    )
+}
+
+fn parse_mcp_timeout_seconds(value: Option<serde_json::Value>) -> Result<u64, InfraError> {
+    let Some(value) = value else {
+        return Ok(MCP_DEFAULT_TIMEOUT_SECONDS);
+    };
+    let parsed = match value {
+        serde_json::Value::Null => MCP_DEFAULT_TIMEOUT_SECONDS,
+        serde_json::Value::Number(number) => number.as_u64().ok_or_else(|| {
+            InfraError::Validation(format!(
+                "{MCP_TIMEOUT_PARAMETER} must be a whole number from 1 to {MCP_MAX_TIMEOUT_SECONDS}."
+            ))
+        })?,
+        serde_json::Value::String(value) => value.trim().parse::<u64>().map_err(|_| {
+            InfraError::Validation(format!(
+                "{MCP_TIMEOUT_PARAMETER} must be a whole number from 1 to {MCP_MAX_TIMEOUT_SECONDS}."
+            ))
+        })?,
+        _ => {
+            return Err(InfraError::Validation(format!(
+                "{MCP_TIMEOUT_PARAMETER} must be a whole number from 1 to {MCP_MAX_TIMEOUT_SECONDS}."
+            )));
+        }
+    };
+    Ok(parsed.clamp(1, MCP_MAX_TIMEOUT_SECONDS))
+}
+
+fn mcp_arg_to_string(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value,
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn create_mcp_tool_definitions(data: &AppData) -> Vec<McpToolDefinition> {
+    let mut drafts = Vec::new();
+    for workspace in &data.workspaces {
+        let connection_name = if workspace.connection.name.trim().is_empty() {
+            workspace.title.as_str()
+        } else {
+            workspace.connection.name.as_str()
+        };
+        for attached in &workspace.attached_scripts {
+            if !attached.use_in_mcp {
+                continue;
+            }
+            let Some(script) = data
+                .global_scripts
+                .iter()
+                .find(|script| script.id == attached.global_script_id)
+            else {
+                continue;
+            };
+            let mut properties = extract_script_variables(&script.content)
+                .into_iter()
+                .map(|variable| {
+                    (
+                        variable.clone(),
+                        McpInputProperty {
+                            r#type: "string".into(),
+                            description: format!(
+                                "Value for {variable}. Omit to use the remote environment or script default."
+                            ),
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            properties.insert(
+                MCP_TIMEOUT_PARAMETER.into(),
+                McpInputProperty {
+                    r#type: "integer".into(),
+                    description: format!(
+                        "MCP execution timeout in seconds, from 1 to {MCP_MAX_TIMEOUT_SECONDS}. Defaults to {MCP_DEFAULT_TIMEOUT_SECONDS}."
+                    ),
+                },
+            );
+            drafts.push((
+                to_tool_slug(&format!("{connection_name}_{}", script.name)),
+                McpToolDefinition {
+                    name: String::new(),
+                    description: if script.description.is_empty() {
+                        format!("Run {} on {connection_name}.", script.name)
+                    } else {
+                        script.description.clone()
+                    },
+                    workspace_id: workspace.id.clone(),
+                    workspace_title: connection_name.into(),
+                    attached_script_id: attached.id.clone(),
+                    global_script_id: script.id.clone(),
+                    input_schema: McpInputSchema {
+                        r#type: "object".into(),
+                        properties,
+                        additional_properties: false,
+                    },
+                },
+            ));
+        }
+    }
+    dedupe_mcp_tool_names(drafts)
+}
+
+fn dedupe_mcp_tool_names(drafts: Vec<(String, McpToolDefinition)>) -> Vec<McpToolDefinition> {
+    let mut used = HashMap::<String, usize>::new();
+    drafts
+        .into_iter()
+        .map(|(base_name, mut definition)| {
+            let base_name = if base_name.is_empty() {
+                format!("script_{}", definition.global_script_id)
+            } else {
+                base_name
+            };
+            let count = *used.get(&base_name).unwrap_or(&0);
+            used.insert(base_name.clone(), count + 1);
+            definition.name = if count == 0 {
+                base_name
+            } else {
+                format!(
+                    "{}_{}",
+                    base_name,
+                    stable_suffix(&definition.attached_script_id)
+                )
+            };
+            definition
+        })
+        .collect()
+}
+
+fn to_tool_slug(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_separator = false;
+    for character in value.trim().to_lowercase().chars() {
+        if character.is_ascii_alphanumeric() {
+            output.push(character);
+            previous_was_separator = false;
+        } else if !previous_was_separator && !output.is_empty() {
+            output.push('_');
+            previous_was_separator = true;
+        }
+    }
+    while output.ends_with('_') {
+        output.pop();
+    }
+    output
+}
+
+fn stable_suffix(value: &str) -> String {
+    let mut hash = 0_u32;
+    for byte in value.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+    }
+    to_base36(hash).chars().take(6).collect()
+}
+
+fn to_base36(mut value: u32) -> String {
+    if value == 0 {
+        return "0".into();
+    }
+    let mut output = Vec::new();
+    while value > 0 {
+        let digit = (value % 36) as u8;
+        output.push(match digit {
+            0..=9 => (b'0' + digit) as char,
+            _ => (b'a' + digit - 10) as char,
+        });
+        value /= 36;
+    }
+    output.iter().rev().collect()
+}
+
+fn extract_script_variables(content: &str) -> Vec<String> {
+    let chars = content.chars().collect::<Vec<_>>();
+    let mut variables = Vec::new();
+    for index in 0..chars.len().saturating_sub(1) {
+        if chars[index] != '$' || chars[index + 1] != '{' || is_escaped_dollar(&chars, index) {
+            continue;
+        }
+        let mut end = index + 2;
+        while end < chars.len() && chars[end] != '}' {
+            end += 1;
+        }
+        if end >= chars.len() {
+            continue;
+        }
+        let expression = chars[index + 2..end].iter().collect::<String>();
+        let variable = expression
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect::<String>();
+        if variable
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+            && !variables.contains(&variable)
+        {
+            variables.push(variable);
+        }
+    }
+    variables
+}
+
+fn is_escaped_dollar(chars: &[char], dollar_index: usize) -> bool {
+    let mut slash_count = 0;
+    let mut index = dollar_index;
+    while index > 0 {
+        index -= 1;
+        if chars[index] != '\\' {
+            break;
+        }
+        slash_count += 1;
+    }
+    slash_count % 2 == 1
+}
+
 struct SecretStore<'a> {
     app: &'a AppHandle,
 }
@@ -1225,9 +1824,9 @@ impl<'a> SecretStore<'a> {
     }
 
     fn set(&self, reference: &str, value: &str, allow_insecure: bool) -> Result<(), InfraError> {
-        match keyring::Entry::new(SERVICE_NAME, reference).and_then(|entry| entry.set_password(value)) {
+        match self.set_os_secret(reference, value) {
             Ok(()) => {
-                if let Err(err) = keyring::Entry::new(SERVICE_NAME, reference).and_then(|entry| entry.get_password()) {
+                if let Err(err) = self.get_preferred_keyring_with_retry(reference) {
                     if allow_insecure {
                         self.set_insecure(reference, value).map_err(|fallback_err| {
                             InfraError::Secret(format!("OS keychain saved but could not be read back ({err}); insecure fallback failed ({fallback_err})"))
@@ -1257,9 +1856,69 @@ impl<'a> SecretStore<'a> {
     }
 
     fn get(&self, reference: &str) -> Result<String, InfraError> {
-        match keyring::Entry::new(SERVICE_NAME, reference).and_then(|entry| entry.get_password()) {
+        match self.get_from_keyring(reference) {
             Ok(value) => Ok(value),
             Err(keychain_err) => self.get_insecure(reference, Some(keychain_err.to_string())),
+        }
+    }
+
+    fn set_os_secret(&self, reference: &str, value: &str) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            windows_set_secret(reference, value)
+        }
+
+        #[cfg(not(windows))]
+        {
+            keyring::Entry::new(SERVICE_NAME, reference)
+                .and_then(|entry| entry.set_password(value))
+                .map_err(|err| err.to_string())
+        }
+    }
+
+    fn get_os_secret(&self, reference: &str) -> Result<String, String> {
+        #[cfg(windows)]
+        {
+            windows_get_secret(reference)
+        }
+
+        #[cfg(not(windows))]
+        {
+            keyring::Entry::new(SERVICE_NAME, reference)
+                .and_then(|entry| entry.get_password())
+                .map_err(|err| err.to_string())
+        }
+    }
+
+    fn get_preferred_keyring_with_retry(&self, reference: &str) -> Result<String, String> {
+        let mut last_error = None;
+        for attempt in 0..10 {
+            match self.get_os_secret(reference) {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempt < 9 {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+        }
+
+        Err(last_error.expect("keyring read retry must record an error"))
+    }
+
+    fn get_from_keyring(&self, reference: &str) -> Result<String, String> {
+        match self.get_os_secret(reference) {
+            Ok(value) => Ok(value),
+            Err(preferred_err) => match keyring::Entry::new(SERVICE_NAME, reference)
+                .and_then(|entry| entry.get_password())
+            {
+                Ok(value) => {
+                    let _ = self.set_os_secret(reference, &value);
+                    Ok(value)
+                }
+                Err(_) => Err(preferred_err),
+            },
         }
     }
 
@@ -1304,6 +1963,92 @@ fn missing_secret_message(reference: &str, keychain_error: Option<&str>) -> Stri
     format!("Saved secret '{reference}' could not be resolved.{detail} Re-enter the credential in Connection Settings, enable insecure fallback if the OS keychain is unavailable, and save the connection.")
 }
 
+#[cfg(windows)]
+fn windows_keyring_target(reference: &str) -> String {
+    let sanitized = reference
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{SERVICE_NAME}.{sanitized}")
+}
+
+#[cfg(windows)]
+fn windows_set_secret(reference: &str, value: &str) -> Result<(), String> {
+    let target = windows_keyring_target(reference);
+    let mut target_name = windows_wide_null(&target);
+    let mut user_name = windows_wide_null(reference);
+    let mut comment = windows_wide_null("InfraSteward SSH secret");
+    let mut blob = value.as_bytes().to_vec();
+    let credential = CREDENTIALW {
+        Flags: 0,
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target_name.as_mut_ptr(),
+        Comment: comment.as_mut_ptr(),
+        LastWritten: FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        },
+        CredentialBlobSize: blob.len() as u32,
+        CredentialBlob: blob.as_mut_ptr(),
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        AttributeCount: 0,
+        Attributes: ptr::null_mut(),
+        TargetAlias: ptr::null_mut(),
+        UserName: user_name.as_mut_ptr(),
+    };
+
+    let result = unsafe { CredWriteW(&credential, 0) };
+    if result == 0 {
+        return Err(windows_credential_error("CredWriteW"));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_get_secret(reference: &str) -> Result<String, String> {
+    let target = windows_keyring_target(reference);
+    let target_name = windows_wide_null(&target);
+    let mut credential: *mut CREDENTIALW = ptr::null_mut();
+    let result = unsafe { CredReadW(target_name.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
+
+    if result == 0 {
+        return Err(windows_credential_error("CredReadW"));
+    }
+
+    let read_result = unsafe {
+        let credential_ref = &*credential;
+        let blob = std::slice::from_raw_parts(
+            credential_ref.CredentialBlob,
+            credential_ref.CredentialBlobSize as usize,
+        );
+        String::from_utf8(blob.to_vec()).map_err(|err| err.to_string())
+    };
+    unsafe { CredFree(credential as *const _) };
+
+    read_result
+}
+
+#[cfg(windows)]
+fn windows_wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn windows_credential_error(operation: &str) -> String {
+    let code = unsafe { GetLastError() };
+    if code == ERROR_NOT_FOUND {
+        return "No matching entry found in secure storage.".into();
+    }
+    format!("{operation} failed with Windows error {code}.")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1314,6 +2059,7 @@ pub fn run() {
             let data = read_app_data(app.handle());
             app.manage(Mutex::new(data));
             app.manage(Mutex::new(HashMap::<String, ActiveExecution>::new()));
+            app.manage(Mutex::new(None::<McpBridgeServer>));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1326,6 +2072,9 @@ pub fn run() {
             drain_script_events,
             log_system_event,
             get_runtime_info,
+            get_mcp_server_status,
+            start_mcp_server,
+            stop_mcp_server,
             open_working_data_dir
         ])
         .run(tauri::generate_context!())

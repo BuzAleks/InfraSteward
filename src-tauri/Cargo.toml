@@ -24,6 +24,7 @@ thiserror = "2.0"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 
 [target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 winreg = "0.52"
 
 [features]

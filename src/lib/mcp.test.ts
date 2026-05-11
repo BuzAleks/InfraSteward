@@ -56,7 +56,8 @@ describe("createMcpToolDefinitions", () => {
   it("generates schemas from script variables", () => {
     const [tool] = createMcpToolDefinitions(appData);
     expect(tool.name).toBe("prod_deploy_backend");
-    expect(Object.keys(tool.inputSchema.properties)).toEqual(["APP_DIR", "SERVICE_NAME"]);
+    expect(Object.keys(tool.inputSchema.properties)).toEqual(["APP_DIR", "SERVICE_NAME", "timeoutSeconds"]);
+    expect(tool.inputSchema.properties.timeoutSeconds.description).toContain("Defaults to 30");
   });
 
   it("handles name collisions with deterministic suffixes", () => {

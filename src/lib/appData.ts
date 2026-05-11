@@ -40,7 +40,7 @@ export function createGlobalScript(fields?: Partial<GlobalScript>): GlobalScript
 }
 
 export function createDefaultAppData(): AppData {
-  const workspace = createWorkspace("Local Server");
+  const workspace = createWorkspace("New Workspace");
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     activeTabId: workspace.id,

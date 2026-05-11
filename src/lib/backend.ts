@@ -115,3 +115,29 @@ export async function openWorkingDataDir(): Promise<void> {
     await invoke("open_working_data_dir");
   }
 }
+
+export type McpServerStatus = {
+  running: boolean;
+  url?: string;
+};
+
+export async function getMcpServerStatus(): Promise<McpServerStatus> {
+  if (isTauriRuntime()) {
+    return invoke("get_mcp_server_status");
+  }
+  return { running: false };
+}
+
+export async function startMcpServer(): Promise<McpServerStatus> {
+  if (isTauriRuntime()) {
+    return invoke("start_mcp_server");
+  }
+  return { running: false };
+}
+
+export async function stopMcpServer(): Promise<McpServerStatus> {
+  if (isTauriRuntime()) {
+    return invoke("stop_mcp_server");
+  }
+  return { running: false };
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent, CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink, Copy } from "lucide-react";
+import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink, Copy, Server } from "lucide-react";
 import { AddScriptsDialog } from "./components/AddScriptsDialog";
 import { ConnectionSettings } from "./components/ConnectionSettings";
 import { Modal } from "./components/Modal";
@@ -17,10 +17,14 @@ import {
   logSystemEvent,
   getRuntimeInfo,
   openWorkingDataDir,
+  getMcpServerStatus,
+  startMcpServer,
+  stopMcpServer,
   cancelScript,
   drainScriptEvents
 } from "./lib/backend";
 import { createId, nowIso } from "./lib/ids";
+import type { McpServerStatus } from "./lib/backend";
 import type { AppData, AttachedScript, GlobalScript, LogEntry, LogLevel, ScriptExecutionEvent, WorkspaceTab } from "./lib/types";
 
 type ModalState =
@@ -155,6 +159,8 @@ function MainApp() {
   const [logsPanelHeight, setLogsPanelHeight] = useState(260);
   const [logsAutoscroll, setLogsAutoscroll] = useState(true);
   const [logLevelFilter, setLogLevelFilter] = useState<Record<LogLevel, boolean>>(createDefaultLogLevelFilter);
+  const [mcpServerStatus, setMcpServerStatus] = useState<McpServerStatus>({ running: false });
+  const [mcpServerBusy, setMcpServerBusy] = useState(false);
   const [runtimePath, setRuntimePath] = useState("");
   const [systemLogPath, setSystemLogPath] = useState("");
   const mainPaneRef = useRef<HTMLElement | null>(null);
@@ -178,6 +184,16 @@ function MainApp() {
         const message = String(reason);
         setError(message);
         void logSystemEvent({ level: "error", target: "frontend", message: "Failed to load app data.", details: message });
+      });
+  }, []);
+
+  useEffect(() => {
+    getMcpServerStatus()
+      .then(setMcpServerStatus)
+      .catch((reason) => {
+        const message = String(reason);
+        setError(`MCP status error: ${message}`);
+        void logSystemEvent({ level: "error", target: "frontend", message: "Failed to read MCP server status.", details: message });
       });
   }, []);
 
@@ -237,6 +253,11 @@ function MainApp() {
     () => data.workspaces.find((workspace) => workspace.id === data.activeTabId) ?? data.workspaces[0],
     [data.activeTabId, data.workspaces]
   );
+  const workspaceTabTitle = (workspace: WorkspaceTab) => workspace.connection.name.trim() || workspace.title || "New Workspace";
+  const connectionTitle = activeWorkspace.connection.name.trim() || activeWorkspace.connection.host || "No connection configured";
+  const connectionSubtitle = activeWorkspace.connection.host
+    ? `${activeWorkspace.connection.username}@${activeWorkspace.connection.host}:${activeWorkspace.connection.port}`
+    : "No host configured";
   const visibleLogs = useMemo(() => filterLogsByLevel(activeWorkspace?.logs ?? [], logLevelFilter), [activeWorkspace?.logs, logLevelFilter]);
   const latestLogId = activeWorkspace?.logs.at(-1)?.id;
 
@@ -344,6 +365,29 @@ function MainApp() {
       const message = String(reason);
       setError(`Could not open working directory: ${message}`);
       void logSystemEvent({ level: "error", target: "frontend", message: "Failed to open working directory.", details: message });
+    }
+  }
+
+  async function toggleMcpServer() {
+    if (mcpServerBusy) {
+      return;
+    }
+    setMcpServerBusy(true);
+    try {
+      const nextStatus = mcpServerStatus.running ? await stopMcpServer() : await startMcpServer();
+      setMcpServerStatus(nextStatus);
+      void logSystemEvent({
+        level: "info",
+        target: "frontend",
+        message: nextStatus.running ? "MCP server enabled from UI." : "MCP server disabled from UI.",
+        details: nextStatus.url
+      });
+    } catch (reason) {
+      const message = String(reason);
+      setError(`MCP server error: ${message}`);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to toggle MCP server.", details: message });
+    } finally {
+      setMcpServerBusy(false);
     }
   }
 
@@ -552,11 +596,11 @@ function MainApp() {
             onDoubleClick={() => renameTab(workspace.id)}
             title="Double-click to rename"
           >
-            <span>{workspace.title || workspace.connection.name || workspace.connection.host || "Workspace"}</span>
+            <span>{workspaceTabTitle(workspace)}</span>
             <span
               role="button"
               tabIndex={0}
-              aria-label={`Close tab ${workspace.title}`}
+              aria-label={`Close tab ${workspaceTabTitle(workspace)}`}
               title="Close tab"
               className="tabClose"
               onClick={(event) => {
@@ -591,6 +635,16 @@ function MainApp() {
           <button type="button" onClick={() => setModal({ kind: "scripts" })}>
             <FileCog size={17} /> Script Manager
           </button>
+          <button
+            type="button"
+            className={`mcpToggle ${mcpServerStatus.running ? "primaryButton" : ""}`}
+            onClick={() => void toggleMcpServer()}
+            disabled={mcpServerBusy}
+            title={mcpServerStatus.running ? `MCP server is running\n${mcpServerStatus.url}` : "Start MCP server"}
+            aria-pressed={mcpServerStatus.running}
+          >
+            <Server size={17} /> MCP {mcpServerStatus.running ? "On" : "Off"}
+          </button>
           {runtimePath && (
             <button
               type="button"
@@ -607,8 +661,8 @@ function MainApp() {
 
         <section className="scriptsPanel" aria-label="Attached scripts">
           <div className="sectionHeading">
-            <h1>{activeWorkspace.title}</h1>
-            <span>{activeWorkspace.connection.host || "No host configured"}</span>
+            <h1>{connectionTitle}</h1>
+            <span>{connectionSubtitle}</span>
           </div>
           <div className="scriptRows">
             {activeWorkspace.attachedScripts.length === 0 && <div className="emptyState">No scripts attached.</div>}
@@ -776,6 +830,7 @@ function MainApp() {
         <Modal title="Connection Settings" onClose={() => setModal({ kind: "none" })} width="wide">
           <ConnectionSettings
             connection={activeWorkspace.connection}
+            connections={data.workspaces.map((workspace) => workspace.connection)}
             busy={busy}
             onCancel={() => setModal({ kind: "none" })}
             onTest={async (connection, secrets) => {
@@ -785,6 +840,7 @@ function MainApp() {
                 setData(nextData);
                 const message = await testConnection(activeWorkspace.id);
                 appendLog(activeWorkspace.id, { level: "info", message, status: "connected" });
+                return message;
               } catch (reason) {
                 void logSystemEvent({
                   level: "error",
@@ -793,6 +849,7 @@ function MainApp() {
                   details: String(reason)
                 });
                 appendLog(activeWorkspace.id, { level: "error", message: String(reason), status: "failed" });
+                throw reason;
               } finally {
                 setBusy(false);
               }
