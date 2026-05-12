@@ -25,6 +25,7 @@ export type GlobalScript = {
 export type ScriptParameterSetting = {
   value: string;
   useFromEnvironment: boolean;
+  useWorkspaceValue?: boolean;
 };
 
 export type AttachedScript = {
@@ -66,6 +67,7 @@ export type WorkspaceTab = {
   id: string;
   title: string;
   connection: SshConnectionConfig;
+  parameterSettings: Record<string, ScriptParameterSetting>;
   attachedScripts: AttachedScript[];
   logs: LogEntry[];
 };

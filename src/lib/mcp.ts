@@ -34,7 +34,7 @@ export function createMcpToolDefinitions(appData: AppData): McpToolDefinition[] 
       for (const variable of variables) {
         properties[variable] = {
           type: "string",
-          description: `Value for ${variable}. Omit to use the remote environment or script default.`
+          description: `Optional override for ${variable}. Omit to use this script's override, workspace value, local environment value, remote environment, or script default.`
         };
       }
       properties[MCP_TIMEOUT_PARAMETER] = {

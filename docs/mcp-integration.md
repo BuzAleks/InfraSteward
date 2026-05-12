@@ -6,7 +6,7 @@ MCP is disabled by default for every attached script. Select attached scripts in
 
 Tool names are generated from connection name, script name, and attachment tag, normalized to lowercase snake case. For example, connection `REG.RU`, script `LOGS`, and tag `default` becomes `reg_ru_logs_default`. Collisions still receive a deterministic suffix based on the attached script id. Tool descriptions include the attachment description first, then the base script description when both are present.
 
-Tool input schemas are generated from detected script variables. Each variable is an optional string so omitted values can fall back to the remote environment or shell defaults.
+Tool input schemas are generated from detected script variables. Each variable is an optional string so omitted values can fall back to script-specific overrides, workspace settings, selected local environment values, the remote environment, or shell defaults.
 
 Every MCP tool also accepts optional `timeoutSeconds`. It may be passed as an integer or a numeric string, defaults to `30`, is clamped to a maximum of `60`, and is enforced inside the desktop app so long-running scripts such as `docker compose logs -f` return with `status: "timeout"` instead of running forever.
 

@@ -23,6 +23,7 @@ export function createWorkspace(title = "New Workspace"): WorkspaceTab {
     id: createId("workspace"),
     title,
     connection: createDefaultConnection(),
+    parameterSettings: {},
     attachedScripts: [],
     logs: []
   };
@@ -72,6 +73,7 @@ export function normalizeAppData(input: unknown): AppData {
       .filter((script) => script.fileName),
     workspaces: workspaces.filter(isWorkspace).map((workspace) => ({
       ...workspace,
+      parameterSettings: isRecord(workspace.parameterSettings) ? normalizeParameterSettings(workspace.parameterSettings) : {},
       attachedScripts: workspace.attachedScripts.map((attached) => ({
         ...attached,
         tag: normalizeScriptTag(attached.tag),
@@ -131,5 +133,20 @@ function isWorkspace(value: unknown): value is WorkspaceTab {
     isRecord(value.connection) &&
     Array.isArray(value.attachedScripts) &&
     Array.isArray(value.logs)
+  );
+}
+
+function normalizeParameterSettings(value: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1]))
+      .map(([name, setting]) => [
+        name,
+        {
+          value: typeof setting.value === "string" ? setting.value : "",
+          useFromEnvironment: Boolean(setting.useFromEnvironment),
+          ...(typeof setting.useWorkspaceValue === "boolean" ? { useWorkspaceValue: setting.useWorkspaceValue } : {})
+        }
+      ])
   );
 }

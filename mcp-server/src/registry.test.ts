@@ -30,6 +30,7 @@ describe("createMcpRegistry", () => {
             username: "deploy",
             authType: "privateKey"
           },
+          parameterSettings: {},
           attachedScripts: [
             {
               id: "attached_1",

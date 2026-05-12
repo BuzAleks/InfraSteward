@@ -95,7 +95,7 @@ On Windows, the backend stores secrets directly in Windows Credential Manager. O
 
 ## Script Parameters
 
-InfraSteward detects `${VAR}` and `${VAR:-default}` style variables in scripts. Bare `$VAR` references are ignored to avoid over-detecting internal shell variables. Manual values are passed to the remote shell as environment variables instead of being substituted directly into script text.
+InfraSteward detects `${VAR}` and `${VAR:-default}` style variables in scripts. Bare `$VAR` references are ignored to avoid over-detecting internal shell variables. Workspace parameters are collected from attached scripts without duplicates and are removed when no attached script uses them. Manual values and selected local environment values are passed to the remote shell as environment variables instead of being substituted directly into script text.
 
 Example:
 
@@ -105,7 +105,7 @@ df -h "${TARGET_PATH:-/}"
 INFRAS_EOF
 ```
 
-If **Use from environment** is enabled for a parameter, InfraSteward does not pass that value manually and lets the remote server resolve it.
+If **Local ENV** is enabled for a parameter, InfraSteward reads the variable from the local app process environment, shows that value in the disabled Value field, and passes it to the remote shell. Empty manual values are still omitted, so the remote server can resolve them itself.
 
 ## MCP Integration
 

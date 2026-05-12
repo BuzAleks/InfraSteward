@@ -8,15 +8,21 @@ describe("shellSingleQuote", () => {
 });
 
 describe("prepareRemoteCommand", () => {
-  it("passes only manual non-empty values as environment variables", () => {
-    const prepared = prepareRemoteCommand("echo ${APP_DIR} ${REMOTE_ONLY}", {
-      APP_DIR: { value: "/srv/app", useFromEnvironment: false },
-      REMOTE_ONLY: { value: "ignored", useFromEnvironment: true },
-      EMPTY: { value: "", useFromEnvironment: false }
-    });
+  it("passes manual and local environment values as remote environment variables", () => {
+    const prepared = prepareRemoteCommand(
+      "echo ${APP_DIR} ${LOCAL_TOKEN} ${REMOTE_ONLY}",
+      {
+        APP_DIR: { value: "/srv/app", useFromEnvironment: false },
+        LOCAL_TOKEN: { value: "saved-manual-value", useFromEnvironment: true },
+        REMOTE_ONLY: { value: "ignored", useFromEnvironment: true },
+        EMPTY: { value: "", useFromEnvironment: false }
+      },
+      "bash",
+      { LOCAL_TOKEN: "from-local-env" }
+    );
 
-    expect(prepared.environment).toEqual({ APP_DIR: "/srv/app" });
-    expect(prepared.command).toContain("APP_DIR='/srv/app' bash -s <<'INFRAS_EOF'");
-    expect(prepared.command).toContain("echo ${APP_DIR} ${REMOTE_ONLY}");
+    expect(prepared.environment).toEqual({ APP_DIR: "/srv/app", LOCAL_TOKEN: "from-local-env" });
+    expect(prepared.command).toContain("APP_DIR='/srv/app' LOCAL_TOKEN='from-local-env' bash -s <<'INFRAS_EOF'");
+    expect(prepared.command).toContain("echo ${APP_DIR} ${LOCAL_TOKEN} ${REMOTE_ONLY}");
   });
 });

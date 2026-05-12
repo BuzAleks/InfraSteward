@@ -22,7 +22,7 @@ Script descriptions are stored in a comment block. The app reads the block from 
 # [/description]
 ```
 
-Each workspace stores `attachedScripts`. An attachment references a global script by `globalScriptId`, has its own unique-per-script `tag` and attachment-level `description` inside that workspace, and owns independent `parameterSettings` and `useInMcp` values.
+Each workspace stores `parameterSettings` and `attachedScripts`. Workspace `parameterSettings` is synchronized from attached script variables: parameters are added without duplicates and removed when no attached script uses them. An attachment references a global script by `globalScriptId`, has its own unique-per-script `tag` and attachment-level `description` inside that workspace, and owns independent `parameterSettings` overrides and `useInMcp` values. Attachment parameters use the workspace value by default unless `useWorkspaceValue` is set to `false`.
 
 Secrets are stored as references such as `conn_x:password`, `conn_x:private-key`, and `conn_x:passphrase`. Secret values are kept in secure OS storage where available. If insecure fallback is explicitly allowed, values are stored in `insecure-secrets.json` in the same working data directory.
 

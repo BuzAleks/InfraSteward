@@ -1,12 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent, CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { CirclePlus, GripVertical, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink, Copy, Server } from "lucide-react";
+import {
+  CirclePlus,
+  GripVertical,
+  Play,
+  Settings,
+  Trash2,
+  X,
+  FileCog,
+  ScrollText,
+  Minus,
+  Plus,
+  RotateCcw,
+  Square,
+  ExternalLink,
+  Copy,
+  Server,
+  SlidersHorizontal
+} from "lucide-react";
 import { AddScriptsDialog } from "./components/AddScriptsDialog";
 import { ConnectionSettings } from "./components/ConnectionSettings";
 import { Modal } from "./components/Modal";
 import { ScriptManager } from "./components/ScriptManager";
 import { ScriptSettings } from "./components/ScriptSettings";
+import { WorkspaceParameters } from "./components/WorkspaceParameters";
 import { createDefaultAppData, createWorkspace, DEFAULT_SCRIPT_TAG, MAX_LOGS_PER_WORKSPACE } from "./lib/appData";
 import {
   saveAppData,
@@ -27,6 +45,7 @@ import {
   drainScriptEvents
 } from "./lib/backend";
 import { createId, nowIso } from "./lib/ids";
+import { ensureWorkspaceParameterSettings, syncAllWorkspaceParameterSettings } from "./lib/workspaceParameters";
 import type { McpServerStatus } from "./lib/backend";
 import type { AppData, AttachedScript, GlobalScript, LogEntry, LogLevel, ScriptExecutionEvent, WorkspaceTab } from "./lib/types";
 
@@ -34,6 +53,7 @@ type ModalState =
   | { kind: "none" }
   | { kind: "connection" }
   | { kind: "scripts" }
+  | { kind: "workspaceParameters" }
   | { kind: "addScripts" }
   | { kind: "scriptSettings"; attachedScriptId: string };
 
@@ -199,7 +219,7 @@ function MainApp() {
       });
     loadAppData()
       .then((loadedData) => {
-        setData(loadedData);
+        setData(syncAllWorkspaceParameterSettings(loadedData));
         setDataLoaded(true);
       })
       .catch((reason) => {
@@ -555,7 +575,7 @@ function MainApp() {
     setBusy(true);
     try {
       const nextData = await saveGlobalScript(script);
-      setData(nextData);
+      setData(syncAllWorkspaceParameterSettings(nextData));
     } catch (reason) {
       const message = String(reason);
       setError(message);
@@ -570,7 +590,7 @@ function MainApp() {
     setBusy(true);
     try {
       const nextData = await deleteGlobalScript(scriptId);
-      setData(nextData);
+      setData(syncAllWorkspaceParameterSettings(nextData));
     } catch (reason) {
       const message = String(reason);
       setError(message);
@@ -873,6 +893,9 @@ function MainApp() {
           <button type="button" onClick={() => setModal({ kind: "connection" })}>
             <Settings size={17} /> Connection Settings
           </button>
+          <button type="button" onClick={() => setModal({ kind: "workspaceParameters" })}>
+            <SlidersHorizontal size={17} /> Workspace Parameters
+          </button>
           <button type="button" onClick={() => setModal({ kind: "scripts" })}>
             <FileCog size={17} /> Script Manager
           </button>
@@ -1035,8 +1058,13 @@ function MainApp() {
                   return;
                 }
                 updateActiveWorkspace((workspace) => ({
-                  ...workspace,
-                  attachedScripts: workspace.attachedScripts.filter((item) => !item.selected)
+                  ...ensureWorkspaceParameterSettings(
+                    {
+                      ...workspace,
+                      attachedScripts: workspace.attachedScripts.filter((item) => !item.selected)
+                    },
+                    data.globalScripts
+                  )
                 }));
               }}
             >
@@ -1158,19 +1186,38 @@ function MainApp() {
             onCancel={() => setModal({ kind: "none" })}
             onAdd={(scriptId, tag) => {
               updateActiveWorkspace((workspace) => ({
-                ...workspace,
-                attachedScripts: [
-                  ...workspace.attachedScripts,
+                ...ensureWorkspaceParameterSettings(
                   {
-                    id: createId("attached"),
-                    globalScriptId: scriptId,
-                    tag,
-                    description: "",
-                    parameterSettings: {},
-                    useInMcp: false
-                  }
-                ]
+                    ...workspace,
+                    attachedScripts: [
+                      ...workspace.attachedScripts,
+                      {
+                        id: createId("attached"),
+                        globalScriptId: scriptId,
+                        tag,
+                        description: "",
+                        parameterSettings: {},
+                        useInMcp: false
+                      }
+                    ]
+                  },
+                  data.globalScripts
+                )
               }));
+            }}
+          />
+        </Modal>
+      )}
+
+      {modal.kind === "workspaceParameters" && (
+        <Modal title="Workspace Parameters" onClose={() => setModal({ kind: "none" })} width="wide">
+          <WorkspaceParameters
+            workspace={activeWorkspace}
+            scripts={data.globalScripts}
+            onCancel={() => setModal({ kind: "none" })}
+            onSave={(parameterSettings) => {
+              updateActiveWorkspace((workspace) => ensureWorkspaceParameterSettings({ ...workspace, parameterSettings }, data.globalScripts));
+              setModal({ kind: "none" });
             }}
           />
         </Modal>
@@ -1188,6 +1235,7 @@ function MainApp() {
               <ScriptSettings
                 script={script}
                 attached={attached}
+                workspaceParameterSettings={activeWorkspace.parameterSettings}
                 workspaceAttachedScripts={activeWorkspace.attachedScripts}
                 onCancel={() => setModal({ kind: "none" })}
                 onSave={(nextAttached) => {

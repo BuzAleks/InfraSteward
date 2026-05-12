@@ -69,6 +69,13 @@ export async function readGlobalScriptContent(scriptId: string): Promise<string>
   return data.globalScripts.find((script) => script.id === scriptId)?.content ?? "";
 }
 
+export async function getLocalEnvironment(names: string[]): Promise<Record<string, string>> {
+  if (isTauriRuntime()) {
+    return invoke("get_local_environment", { names });
+  }
+  return {};
+}
+
 export async function saveConnection(request: ConnectionSaveRequest): Promise<AppData> {
   if (isTauriRuntime()) {
     return normalizeAppData(await invoke("save_connection", { request }));

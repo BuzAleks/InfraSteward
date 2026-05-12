@@ -98,11 +98,13 @@ pub struct WorkspaceTab {
     id: String,
     title: String,
     connection: SshConnectionConfig,
+    #[serde(default)]
+    parameter_settings: HashMap<String, ScriptParameterSetting>,
     attached_scripts: Vec<AttachedScript>,
     logs: Vec<LogEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachedScript {
     id: String,
@@ -116,11 +118,13 @@ pub struct AttachedScript {
     selected: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptParameterSetting {
     value: String,
     use_from_environment: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    use_workspace_value: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -326,7 +330,8 @@ fn load_app_data(app: AppHandle, state: State<'_, SharedAppData>) -> Result<AppD
         .clone();
     match sync_scripts_from_files(&app, &mut data) {
         Ok(changed) => {
-            if changed {
+            let parameters_changed = sync_all_workspace_parameter_settings(&mut data);
+            if changed || parameters_changed {
                 write_app_data(&app, &data)?;
             }
         }
@@ -339,6 +344,9 @@ fn load_app_data(app: AppHandle, state: State<'_, SharedAppData>) -> Result<AppD
                 Some(err.to_string()),
             );
             hydrate_script_contents(&app, &mut data)?;
+            if sync_all_workspace_parameter_settings(&mut data) {
+                write_app_data(&app, &data)?;
+            }
         }
     }
     *state
@@ -355,6 +363,7 @@ fn save_app_data(
 ) -> Result<(), InfraError> {
     let mut normalized = normalize_app_data(app_data);
     sync_scripts_from_files(&app, &mut normalized)?;
+    sync_all_workspace_parameter_settings(&mut normalized);
     if let Err(err) = write_app_data(&app, &normalized) {
         write_system_log(
             &app,
@@ -424,7 +433,8 @@ fn save_global_script(
         data.global_scripts.push(next_script);
     }
 
-    let normalized = normalize_app_data(data);
+    let mut normalized = normalize_app_data(data);
+    sync_all_workspace_parameter_settings(&mut normalized);
     write_app_data(&app, &normalized)?;
     *state
         .lock()
@@ -453,7 +463,8 @@ fn delete_global_script(
         delete_script_file(&app, &normalized_script_file_name(&script)?)?;
     }
 
-    let normalized = normalize_app_data(data);
+    let mut normalized = normalize_app_data(data);
+    sync_all_workspace_parameter_settings(&mut normalized);
     write_app_data(&app, &normalized)?;
     *state
         .lock()
@@ -477,6 +488,14 @@ fn read_global_script_content(
         .find(|script| script.id == script_id)
         .ok_or(InfraError::MissingScript)?;
     read_script_file(&app, script)
+}
+
+#[tauri::command]
+fn get_local_environment(names: Vec<String>) -> HashMap<String, String> {
+    names
+        .into_iter()
+        .filter_map(|name| std::env::var(&name).ok().map(|value| (name, value)))
+        .collect()
 }
 
 #[tauri::command]
@@ -655,7 +674,7 @@ async fn run_script(
         .ok_or(InfraError::MissingScript)?;
     let script_content = read_script_file(&app, script)?;
 
-    let mut settings = attached.parameter_settings.clone();
+    let mut settings = parameter_settings_for_script(&workspace, attached, &script_content);
     if let Some(overrides) = request.parameter_overrides {
         for (key, value) in overrides {
             settings.insert(
@@ -663,6 +682,7 @@ async fn run_script(
                 ScriptParameterSetting {
                     value,
                     use_from_environment: false,
+                    use_workspace_value: Some(false),
                 },
             );
         }
@@ -1144,8 +1164,16 @@ fn prepare_remote_command(
 ) -> String {
     let env_prefix = settings
         .iter()
-        .filter(|(_, setting)| !setting.use_from_environment && !setting.value.is_empty())
-        .map(|(name, setting)| format!("{name}={}", shell_single_quote(&setting.value)))
+        .filter_map(|(name, setting)| {
+            if setting.use_from_environment {
+                return std::env::var(name).ok().map(|value| (name, value));
+            }
+            if setting.value.is_empty() {
+                return None;
+            }
+            Some((name, setting.value.clone()))
+        })
+        .map(|(name, value)| format!("{name}={}", shell_single_quote(&value)))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -1158,6 +1186,33 @@ fn prepare_remote_command(
         },
         script_content
     )
+}
+
+fn parameter_settings_for_script(
+    workspace: &WorkspaceTab,
+    attached: &AttachedScript,
+    script_content: &str,
+) -> HashMap<String, ScriptParameterSetting> {
+    extract_script_variables(script_content)
+        .into_iter()
+        .map(|variable| {
+            let attached_setting = attached.parameter_settings.get(&variable);
+            let use_workspace_value = attached_setting
+                .and_then(|setting| setting.use_workspace_value)
+                .unwrap_or(attached_setting.is_none());
+            let setting = if use_workspace_value {
+                workspace
+                    .parameter_settings
+                    .get(&variable)
+                    .cloned()
+                    .or_else(|| attached_setting.cloned())
+                    .unwrap_or_default()
+            } else {
+                attached_setting.cloned().unwrap_or_default()
+            };
+            (variable, setting)
+        })
+        .collect()
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -1306,6 +1361,7 @@ fn normalize_app_data(mut data: AppData) -> AppData {
         data.active_tab_id = data.workspaces[0].id.clone();
     }
     for workspace in &mut data.workspaces {
+        sync_workspace_parameter_settings(workspace, &data.global_scripts);
         for attached in &mut workspace.attached_scripts {
             if attached.tag.trim().is_empty() {
                 attached.tag = default_script_tag();
@@ -1355,9 +1411,50 @@ fn default_workspace() -> WorkspaceTab {
             connection_timeout_seconds: Some(15),
             execution_timeout_seconds: Some(300),
         },
+        parameter_settings: HashMap::new(),
         attached_scripts: Vec::new(),
         logs: Vec::new(),
     }
+}
+
+fn sync_workspace_parameter_settings(workspace: &mut WorkspaceTab, scripts: &[GlobalScript]) -> bool {
+    let mut active_names = Vec::new();
+    for attached in &workspace.attached_scripts {
+        let Some(script) = scripts
+            .iter()
+            .find(|script| script.id == attached.global_script_id)
+        else {
+            continue;
+        };
+        for variable in extract_script_variables(&script.content) {
+            if !active_names.contains(&variable) {
+                active_names.push(variable);
+            }
+        }
+    }
+    active_names.sort();
+    let next_settings = active_names
+        .into_iter()
+        .map(|name| {
+            let setting = workspace
+                .parameter_settings
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            (name, setting)
+        })
+        .collect::<HashMap<_, _>>();
+    let changed = workspace.parameter_settings != next_settings;
+    workspace.parameter_settings = next_settings;
+    changed
+}
+
+fn sync_all_workspace_parameter_settings(data: &mut AppData) -> bool {
+    let mut changed = false;
+    for workspace in &mut data.workspaces {
+        changed = sync_workspace_parameter_settings(workspace, &data.global_scripts) || changed;
+    }
+    changed
 }
 
 fn app_data_path(app: &AppHandle) -> Result<PathBuf, InfraError> {
@@ -1685,7 +1782,8 @@ fn read_app_data(app: &AppHandle) -> AppData {
 
     match sync_scripts_from_files(app, &mut data) {
         Ok(changed) => {
-            if changed {
+            let parameters_changed = sync_all_workspace_parameter_settings(&mut data);
+            if changed || parameters_changed {
                 let _ = write_app_data(app, &data);
             }
         }
@@ -2103,13 +2201,14 @@ fn execute_mcp_bridge_script(
     let script_content = read_script_file(app, script)?;
     let mut args = request.args.unwrap_or_default();
     let timeout_seconds = parse_mcp_timeout_seconds(args.remove(MCP_TIMEOUT_PARAMETER))?;
-    let mut settings = attached.parameter_settings.clone();
+    let mut settings = parameter_settings_for_script(&workspace, attached, &script_content);
     for (key, value) in args {
         settings.insert(
             key,
             ScriptParameterSetting {
                 value: mcp_arg_to_string(value),
                 use_from_environment: false,
+                use_workspace_value: Some(false),
             },
         );
     }
@@ -2192,7 +2291,7 @@ fn create_mcp_tool_definitions(data: &AppData) -> Vec<McpToolDefinition> {
                         McpInputProperty {
                             r#type: "string".into(),
                             description: format!(
-                                "Value for {variable}. Omit to use the remote environment or script default."
+                                "Optional override for {variable}. Omit to use this script's override, workspace value, local environment value, remote environment, or script default."
                             ),
                         },
                     )
@@ -2626,6 +2725,7 @@ pub fn run() {
             save_global_script,
             delete_global_script,
             read_global_script_content,
+            get_local_environment,
             save_connection,
             test_connection,
             run_script,

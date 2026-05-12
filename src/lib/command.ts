@@ -7,12 +7,20 @@ export function shellSingleQuote(value: string): string {
 export function prepareRemoteCommand(
   scriptContent: string,
   parameterSettings: Record<string, ScriptParameterSetting>,
-  shell: "bash" | "sh" = "bash"
+  shell: "bash" | "sh" = "bash",
+  localEnvironment: Record<string, string | undefined> = {}
 ): PreparedCommand {
   const environment: Record<string, string> = {};
 
   for (const [name, setting] of Object.entries(parameterSettings)) {
-    if (setting.useFromEnvironment || setting.value === "") {
+    if (setting.useFromEnvironment) {
+      const localValue = localEnvironment[name];
+      if (localValue !== undefined) {
+        environment[name] = localValue;
+      }
+      continue;
+    }
+    if (setting.value === "") {
       continue;
     }
     environment[name] = setting.value;
