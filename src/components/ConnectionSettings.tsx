@@ -1,24 +1,33 @@
 import { useState } from "react";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import type { SecretInput, SshConnectionConfig } from "../lib/types";
 import { validateConnection } from "../lib/validation";
 
 type Props = {
   connection: SshConnectionConfig;
+  connections: SshConnectionConfig[];
   onCancel: () => void;
   onSave: (connection: SshConnectionConfig, secrets: SecretInput) => Promise<void>;
-  onTest: (connection: SshConnectionConfig, secrets: SecretInput) => Promise<void>;
+  onTest: (connection: SshConnectionConfig, secrets: SecretInput) => Promise<string>;
   busy: boolean;
 };
 
-export function ConnectionSettings({ connection, onCancel, onSave, onTest, busy }: Props) {
+export function ConnectionSettings({ connection, connections, onCancel, onSave, onTest, busy }: Props) {
   const [draft, setDraft] = useState(connection);
   const [secrets, setSecrets] = useState<SecretInput>({});
   const [errors, setErrors] = useState<string[]>([]);
+  const [testResult, setTestResult] = useState<{ status: "success" | "error"; message: string } | null>(null);
 
   function validateDraft() {
     const hasSavedSecret =
       draft.authType === "password" ? Boolean(draft.passwordRef || secrets.password) : Boolean(draft.privateKeyPath || draft.privateKeyContentRef || secrets.privateKeyContent);
-    const nextErrors = validateConnection(draft, hasSavedSecret);
+    const normalizedName = draft.name.trim().toLowerCase();
+    const duplicateName = connections.some((candidate) => candidate.id !== draft.id && candidate.name.trim().toLowerCase() === normalizedName);
+    const nextErrors = [
+      ...validateConnection(draft, hasSavedSecret),
+      ...(normalizedName ? [] : ["Connection name is required."]),
+      ...(duplicateName ? ["Connection name must be unique."] : [])
+    ];
     setErrors(nextErrors);
     return nextErrors.length === 0;
   }
@@ -31,7 +40,13 @@ export function ConnectionSettings({ connection, onCancel, onSave, onTest, busy 
 
   async function test() {
     if (validateDraft()) {
-      await onTest(draft, secrets);
+      setTestResult(null);
+      try {
+        const message = await onTest(draft, secrets);
+        setTestResult({ status: "success", message: message || "Connection OK" });
+      } catch (reason) {
+        setTestResult({ status: "error", message: String(reason) });
+      }
     }
   }
 
@@ -42,6 +57,15 @@ export function ConnectionSettings({ connection, onCancel, onSave, onTest, busy 
           {errors.map((error) => (
             <div key={error}>{error}</div>
           ))}
+        </div>
+      )}
+      {testResult && (
+        <div className={`connectionTestResult ${testResult.status}`} role={testResult.status === "error" ? "alert" : "status"}>
+          {testResult.status === "success" ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+          <div>
+            <strong>{testResult.status === "success" ? "OK" : "Connection failed"}</strong>
+            <span>{testResult.message}</span>
+          </div>
         </div>
       )}
       <label>

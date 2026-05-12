@@ -1,6 +1,8 @@
 # Script Manager
 
-Global scripts are reusable templates available to every workspace tab. Tabs attach references to global scripts and store per-tab parameter settings.
+Global scripts are reusable templates available to every workspace tab. Tabs attach references to global scripts and store per-attachment tags, parameter settings, and MCP enablement.
+
+The same global script can be attached to a workspace more than once. The first attachment uses tag `default`; additional attachments ask for a tag. Tags are unique per global script within a workspace and are shown after the script name, such as `Deploy (blue)`.
 
 Variables are detected from shell expressions like `${APP_DIR}` and `${SERVICE_NAME}`. `${VAR:-default}` is supported by detecting `VAR` while leaving the script text unchanged. Duplicate variables are shown once in first-seen order. Bare `$VAR` references are ignored to avoid over-detecting internal shell variables. Escaped variables such as `\${VAR}` are ignored.
 

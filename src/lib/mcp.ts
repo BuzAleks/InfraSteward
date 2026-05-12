@@ -1,6 +1,10 @@
 import { extractScriptVariables } from "./parser";
 import type { AppData, McpToolDefinition } from "./types";
 
+export const MCP_TIMEOUT_PARAMETER = "timeoutSeconds";
+export const MCP_DEFAULT_TIMEOUT_SECONDS = 30;
+export const MCP_MAX_TIMEOUT_SECONDS = 60;
+
 export function toToolSlug(value: string): string {
   return value
     .trim()
@@ -14,6 +18,7 @@ export function createMcpToolDefinitions(appData: AppData): McpToolDefinition[] 
   const tools: MpcToolDraft[] = [];
 
   for (const workspace of appData.workspaces) {
+    const connectionName = workspace.connection.name.trim() || workspace.title;
     for (const attached of workspace.attachedScripts) {
       if (!attached.useInMcp) {
         continue;
@@ -32,12 +37,17 @@ export function createMcpToolDefinitions(appData: AppData): McpToolDefinition[] 
           description: `Value for ${variable}. Omit to use the remote environment or script default.`
         };
       }
+      properties[MCP_TIMEOUT_PARAMETER] = {
+        type: "integer",
+        description: `MCP execution timeout in seconds, from 1 to ${MCP_MAX_TIMEOUT_SECONDS}. Defaults to ${MCP_DEFAULT_TIMEOUT_SECONDS}.`
+      };
 
+      const scriptTag = attached.tag.trim() || "default";
       tools.push({
-        baseName: toToolSlug(`${workspace.title}_${script.name}`) || `script_${script.id}`,
-        description: script.description || `Run ${script.name} on ${workspace.title}.`,
+        baseName: toToolSlug(`${connectionName}_${script.name}_${scriptTag}`) || `script_${script.id}_${scriptTag}`,
+        description: script.description || `Run ${script.name} (${scriptTag}) on ${connectionName}.`,
         workspaceId: workspace.id,
-        workspaceTitle: workspace.title,
+        workspaceTitle: connectionName,
         attachedScriptId: attached.id,
         globalScriptId: script.id,
         inputSchema: {

@@ -6,21 +6,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { normalizeAppData } from "../../src/lib/appData";
-import type { AppData, ExecutionResult } from "../../src/lib/types";
-import { createMcpRegistry } from "./registry";
+import type { AppData, ExecutionResult, McpToolDefinition } from "../../src/lib/types";
+import { createMcpRegistry, type McpToolArguments, type RegisteredMcpTool } from "./registry";
+
+const DEFAULT_BRIDGE_URL = "http://127.0.0.1:47321";
 
 async function main() {
-  const appData = await loadAppData();
   const server = new McpServer({
     name: "infrasteward",
     version: "0.1.0"
   });
 
-  const registry = createMcpRegistry(appData, executeViaAdapter);
+  const registry = await loadRegistry();
   for (const tool of registry) {
-    const shape: Record<string, z.ZodOptional<z.ZodString>> = {};
-    for (const parameter of Object.keys(tool.inputSchema.properties)) {
-      shape[parameter] = z.string().optional();
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const [parameter, property] of Object.entries(tool.inputSchema.properties)) {
+      shape[parameter] =
+        property.type === "integer"
+          ? z.union([z.number().int(), z.string().regex(/^\d+$/)]).optional()
+          : z.string().optional();
     }
 
     server.registerTool(
@@ -30,7 +34,7 @@ async function main() {
         inputSchema: z.object(shape)
       },
       async (args) => {
-        const result = await tool.execute(args as Record<string, string>);
+        const result = await tool.execute(args as McpToolArguments);
         return {
           content: [
             {
@@ -48,6 +52,34 @@ async function main() {
   await server.connect(transport);
 }
 
+async function loadRegistry(): Promise<RegisteredMcpTool[]> {
+  const bridgeUrl = bridgeBaseUrl();
+  try {
+    return await loadBridgeRegistry(bridgeUrl);
+  } catch (bridgeError) {
+    if (!process.env.INFRASTEWARD_APP_DATA) {
+      throw new Error(
+        `InfraSteward desktop MCP server is not available at ${bridgeUrl}. Open InfraSteward and enable MCP server on the main screen. ${String(bridgeError)}`
+      );
+    }
+
+    const appData = await loadAppData();
+    return createMcpRegistry(appData, executeViaAdapter);
+  }
+}
+
+function bridgeBaseUrl(): string {
+  return (process.env.INFRASTEWARD_MCP_BRIDGE_URL ?? DEFAULT_BRIDGE_URL).replace(/\/+$/, "");
+}
+
+async function loadBridgeRegistry(bridgeUrl: string): Promise<RegisteredMcpTool[]> {
+  const tools = await fetchBridgeJson<McpToolDefinition[]>(`${bridgeUrl}/tools`);
+  return tools.map((tool) => ({
+    ...tool,
+    execute: (args) => executeViaBridge(bridgeUrl, tool.workspaceId, tool.attachedScriptId, args)
+  }));
+}
+
 async function loadAppData(): Promise<AppData> {
   const explicitPath = process.env.INFRASTEWARD_APP_DATA;
   const appDataPath = explicitPath ?? defaultAppDataPath();
@@ -63,6 +95,59 @@ function defaultAppDataPath(): string {
     return join(homedir(), "Library", "Application Support", "dev.infrasteward.desktop", "app-data.json");
   }
   return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "dev.infrasteward.desktop", "app-data.json");
+}
+
+async function executeViaBridge(
+  bridgeUrl: string,
+  workspaceId: string,
+  attachedScriptId: string,
+  args: McpToolArguments
+): Promise<ExecutionResult> {
+  try {
+    const response = await globalThis.fetch(`${bridgeUrl}/execute`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId, attachedScriptId, args })
+    });
+    if (response.ok) {
+      return (await response.json()) as ExecutionResult;
+    }
+
+    return {
+      status: "failed",
+      stdout: "",
+      stderr: await readBridgeError(response),
+      exitCode: 1
+    };
+  } catch (error) {
+    return {
+      status: "failed",
+      stdout: "",
+      stderr: `InfraSteward MCP server is not running at ${bridgeUrl}. Enable it in the desktop app and retry. ${String(error)}`,
+      exitCode: 1
+    };
+  }
+}
+
+async function fetchBridgeJson<T>(url: string): Promise<T> {
+  const response = await globalThis.fetch(url);
+  if (!response.ok) {
+    throw new Error(await readBridgeError(response));
+  }
+  return (await response.json()) as T;
+}
+
+async function readBridgeError(response: globalThis.Response): Promise<string> {
+  const text = await response.text();
+  if (!text) {
+    return `HTTP ${response.status} ${response.statusText}`;
+  }
+  try {
+    const body = JSON.parse(text) as { error?: string };
+    return body.error ?? text;
+  } catch {
+    return text;
+  }
 }
 
 async function executeViaAdapter(

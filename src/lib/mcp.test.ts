@@ -28,18 +28,20 @@ const appData: AppData = {
         authType: "privateKey"
       },
       attachedScripts: [
-        {
-          id: "attached_1",
-          globalScriptId: "script_1",
-          parameterSettings: {},
-          useInMcp: true
-        },
-        {
-          id: "attached_2",
-          globalScriptId: "script_1",
-          parameterSettings: {},
-          useInMcp: true
-        }
+          {
+            id: "attached_1",
+            globalScriptId: "script_1",
+            tag: "default",
+            parameterSettings: {},
+            useInMcp: true
+          },
+          {
+            id: "attached_2",
+            globalScriptId: "script_1",
+            tag: "blue",
+            parameterSettings: {},
+            useInMcp: true
+          }
       ],
       logs: []
     }
@@ -55,13 +57,14 @@ describe("toToolSlug", () => {
 describe("createMcpToolDefinitions", () => {
   it("generates schemas from script variables", () => {
     const [tool] = createMcpToolDefinitions(appData);
-    expect(tool.name).toBe("prod_deploy_backend");
-    expect(Object.keys(tool.inputSchema.properties)).toEqual(["APP_DIR", "SERVICE_NAME"]);
+    expect(tool.name).toBe("prod_deploy_backend_default");
+    expect(Object.keys(tool.inputSchema.properties)).toEqual(["APP_DIR", "SERVICE_NAME", "timeoutSeconds"]);
+    expect(tool.inputSchema.properties.timeoutSeconds.description).toContain("Defaults to 30");
   });
 
-  it("handles name collisions with deterministic suffixes", () => {
+  it("includes attachment tags in tool names", () => {
     const tools = createMcpToolDefinitions(appData);
     expect(tools).toHaveLength(2);
-    expect(tools[1].name).toMatch(/^prod_deploy_backend_[a-z0-9]+$/);
+    expect(tools[1].name).toBe("prod_deploy_backend_blue");
   });
 });

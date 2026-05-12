@@ -9,11 +9,12 @@ Built with **Tauri 2**, **React**, **TypeScript**, and **Rust**, InfraSteward ke
 - **Tabbed SSH workspaces** for different servers, environments, or projects.
 - **Password and private-key authentication** through the Rust `ssh2` backend.
 - **Secret-aware credential storage** using the OS keychain when available, with an explicit local fallback option.
-- **Reusable global scripts** that can be attached to any workspace.
+- **Reusable global scripts** that can be attached to any workspace multiple times.
 - **Parameter detection** for `${VAR}` style script inputs.
-- **Per-workspace script settings** so the same global script can behave differently on different servers.
-- **Execution logs** with status, stdout, stderr, timestamps, and exit codes.
-- **Local MCP server support** for exposing trusted scripts as LLM-callable tools.
+- **Per-workspace script tags and settings** so the same global script can behave differently on the same or different servers.
+- **Ordered and queued script runs** with selectable sequential execution.
+- **Execution logs** with status, stdout, stderr, timestamps, level filters, copy support, and exit codes.
+- **Local MCP bridge support** for exposing trusted scripts as LLM-callable tools.
 
 ## Screens
 
@@ -23,7 +24,7 @@ InfraSteward is organized around a small set of practical views:
 - **Connection Settings**: configure host, port, username, authentication type, timeouts, and credentials.
 - **Script Manager**: create, edit, search, and delete reusable scripts.
 - **Attached Scripts**: choose which scripts belong to the active workspace.
-- **Logs**: review command output and execution history for the active workspace.
+- **Logs**: review command output and execution history for the active workspace, or run a script in a separate log window.
 
 ## Getting Started
 
@@ -47,16 +48,17 @@ npm install
 npm.cmd run dev
 ```
 
-### Build A Fresh Desktop Executable
+### Build A Fresh Desktop Executable And Installer
 
 ```bash
-npm.cmd exec tauri build -- --no-bundle
+npm.cmd run build
 ```
 
-The Windows release executable is written to:
+The Windows release executable and installer are written to:
 
 ```text
 src-tauri/target/release/infrasteward.exe
+src-tauri/target/release/bundle/nsis/InfraSteward_0.1.0_x64-setup.exe
 ```
 
 To build the web frontend only:
@@ -70,9 +72,12 @@ npm.cmd run web:build
 1. Open **Connection Settings** and enter the server host, port, username, and authentication method.
 2. Enter a password or private key details, then click **Test Connection**.
 3. Open **Script Manager** and create reusable shell scripts.
-4. Attach scripts to the active workspace.
-5. Configure detected parameters in each script row's settings.
-6. Click **Run** and review stdout, stderr, status, and exit code in the logs panel.
+4. Attach scripts to the active workspace. The first copy uses tag `default`; additional copies ask for a unique tag.
+5. Configure detected parameters and attachment tags in each script row's settings.
+6. Click a row's **Run** button for a single script, or select several rows and click bottom **Play** to run them sequentially.
+7. Review stdout, stderr, status, and exit code in the logs panel.
+
+The active working data directory is shown in the main toolbar. Click it to open the directory in the system file explorer.
 
 ## Credential Storage
 
@@ -86,7 +91,7 @@ conn_x:private-key
 conn_x:passphrase
 ```
 
-The backend first uses the operating system keychain. If the OS keychain is unavailable, you can explicitly enable insecure fallback storage in **Connection Settings**. This fallback stores secrets in the app data directory and should only be used on a machine you control.
+On Windows, the backend stores secrets directly in Windows Credential Manager. On other platforms it uses the OS keychain through the `keyring` crate. If secure storage is unavailable, you can explicitly enable insecure fallback storage in **Connection Settings**. This fallback stores secrets in the working data directory and should only be used on a machine you control.
 
 ## Script Parameters
 
@@ -104,16 +109,20 @@ If **Use from environment** is enabled for a parameter, InfraSteward does not pa
 
 ## MCP Integration
 
-The `mcp-server/` package can expose selected InfraSteward scripts as MCP tools. This is intentionally opt-in because MCP tool calls can execute remote commands over SSH.
+The `mcp-server/` package can expose selected InfraSteward scripts as MCP tools. Turn on the local MCP bridge with the **MCP On/Off** button in the main toolbar, then point your MCP client at `npm.cmd run mcp:dev` from this repository. The desktop app listens on `127.0.0.1:47321`; the stdio wrapper forwards MCP tool discovery and execution to that bridge. This is intentionally opt-in because MCP tool calls can execute remote commands over SSH.
 
 Only enable **Use in MCP** for scripts you trust.
+
+Tool names include connection name, script name, and attachment tag. For example, `REG.RU` + `LOGS` + `default` becomes `reg_ru_logs_default`.
+
+MCP calls accept an optional `timeoutSeconds` argument. The desktop app defaults it to `30` seconds and caps it at `60` seconds, so follow-mode scripts can be used without trapping the client forever.
 
 ## Project Structure
 
 ```text
 src/            React frontend and shared TypeScript logic
 src-tauri/      Tauri Rust backend, SSH execution, and native app config
-mcp-server/     Local MCP server package
+mcp-server/     MCP stdio wrapper for the desktop bridge
 docs/           Architecture, security, storage, and usage notes
 dist/           Generated frontend build output
 ```
@@ -124,7 +133,7 @@ dist/           Generated frontend build output
 npm.cmd run lint
 npm.cmd run test
 npm.cmd run web:build
-npm.cmd exec tauri build -- --no-bundle
+npm.cmd run build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 

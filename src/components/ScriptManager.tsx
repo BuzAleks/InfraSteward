@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { ArrowLeft, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { createGlobalScript } from "../lib/appData";
 import type { GlobalScript } from "../lib/types";
 
@@ -31,6 +31,22 @@ export function ScriptManager({ scripts, attachmentCounts, onSave, onDelete }: P
     if (confirm(message)) {
       onDelete(script.id);
     }
+  }
+
+  if (editing) {
+    const isNewScript = !scripts.some((script) => script.id === editing.id);
+    return (
+      <ScriptEditor
+        script={editing}
+        title={isNewScript ? "Create script" : "Edit script"}
+        scripts={scripts}
+        onBack={() => setEditing(null)}
+        onSave={(script) => {
+          onSave(script);
+          setEditing(null);
+        }}
+      />
+    );
   }
 
   return (
@@ -66,36 +82,40 @@ export function ScriptManager({ scripts, attachmentCounts, onSave, onDelete }: P
         ))}
       </div>
 
-      {editing && (
-        <ScriptEditor
-          script={editing}
-          onCancel={() => setEditing(null)}
-          onSave={(script) => {
-            onSave(script);
-            setEditing(null);
-          }}
-        />
-      )}
     </div>
   );
 }
 
 function ScriptEditor({
   script,
+  title,
+  scripts,
   onSave,
-  onCancel
+  onBack
 }: {
   script: GlobalScript;
+  title: string;
+  scripts: GlobalScript[];
   onSave: (script: GlobalScript) => void;
-  onCancel: () => void;
+  onBack: () => void;
 }) {
   const [draft, setDraft] = useState(script);
+  const normalizedName = draft.name.trim().toLowerCase();
+  const duplicateName = scripts.some((candidate) => candidate.id !== draft.id && candidate.name.trim().toLowerCase() === normalizedName);
+  const canSave = Boolean(normalizedName) && !duplicateName;
 
   return (
-    <div className="inlineEditor">
+    <div className="scriptEditorScreen">
+      <div className="editorToolbar">
+        <button type="button" onClick={onBack}>
+          <ArrowLeft size={16} /> Back
+        </button>
+        <h3>{title}</h3>
+      </div>
       <label>
         Name
         <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+        {duplicateName && <span className="fieldError">Script name must be unique.</span>}
       </label>
       <label>
         Description
@@ -106,14 +126,14 @@ function ScriptEditor({
         <textarea rows={12} value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} />
       </label>
       <div className="modalActions">
-        <button type="button" onClick={onCancel}>
+        <button type="button" onClick={onBack}>
           Cancel
         </button>
         <button
           type="button"
           className="primaryButton"
           onClick={() => onSave({ ...draft, updatedAt: new Date().toISOString() })}
-          disabled={!draft.name.trim()}
+          disabled={!canSave}
         >
           Save
         </button>

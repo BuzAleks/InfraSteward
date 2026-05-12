@@ -29,6 +29,7 @@ export type ScriptParameterSetting = {
 export type AttachedScript = {
   id: string;
   globalScriptId: string;
+  tag: string;
   parameterSettings: Record<string, ScriptParameterSetting>;
   useInMcp: boolean;
   selected?: boolean;
@@ -131,7 +132,7 @@ export type McpToolDefinition = {
   globalScriptId: string;
   inputSchema: {
     type: "object";
-    properties: Record<string, { type: "string"; description: string }>;
+    properties: Record<string, { type: "string" | "integer"; description: string }>;
     additionalProperties: false;
   };
 };

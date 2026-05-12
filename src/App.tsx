@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent, CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { CirclePlus, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink, Copy } from "lucide-react";
+import { CirclePlus, GripVertical, Play, Settings, Trash2, X, FileCog, ScrollText, Minus, Plus, RotateCcw, Square, ExternalLink, Copy, Server } from "lucide-react";
 import { AddScriptsDialog } from "./components/AddScriptsDialog";
 import { ConnectionSettings } from "./components/ConnectionSettings";
 import { Modal } from "./components/Modal";
 import { ScriptManager } from "./components/ScriptManager";
 import { ScriptSettings } from "./components/ScriptSettings";
-import { createDefaultAppData, createWorkspace, MAX_LOGS_PER_WORKSPACE } from "./lib/appData";
+import { createDefaultAppData, createWorkspace, DEFAULT_SCRIPT_TAG, MAX_LOGS_PER_WORKSPACE } from "./lib/appData";
 import {
   saveAppData,
   loadAppData,
@@ -17,10 +17,14 @@ import {
   logSystemEvent,
   getRuntimeInfo,
   openWorkingDataDir,
+  getMcpServerStatus,
+  startMcpServer,
+  stopMcpServer,
   cancelScript,
   drainScriptEvents
 } from "./lib/backend";
 import { createId, nowIso } from "./lib/ids";
+import type { McpServerStatus } from "./lib/backend";
 import type { AppData, AttachedScript, GlobalScript, LogEntry, LogLevel, ScriptExecutionEvent, WorkspaceTab } from "./lib/types";
 
 type ModalState =
@@ -36,6 +40,13 @@ type RunningExecution = {
   attachedScriptId: string;
   scriptName: string;
 };
+
+type QueuedScript = {
+  workspaceId: string;
+  attachedScriptId: string;
+};
+
+type DropPosition = "before" | "after";
 
 const LOG_LEVELS: LogLevel[] = ["info", "warn", "error", "stdout", "stderr"];
 
@@ -150,16 +161,23 @@ function MainApp() {
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [error, setError] = useState("");
   const [runningExecution, setRunningExecution] = useState<RunningExecution | null>(null);
+  const [queuedScripts, setQueuedScripts] = useState<QueuedScript[]>([]);
+  const [draggingAttachedId, setDraggingAttachedId] = useState<string | null>(null);
+  const [dragOverAttachedId, setDragOverAttachedId] = useState<string | null>(null);
+  const [dragOverPosition, setDragOverPosition] = useState<DropPosition | null>(null);
   const [stoppingScriptId, setStoppingScriptId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [logsPanelHeight, setLogsPanelHeight] = useState(260);
   const [logsAutoscroll, setLogsAutoscroll] = useState(true);
   const [logLevelFilter, setLogLevelFilter] = useState<Record<LogLevel, boolean>>(createDefaultLogLevelFilter);
+  const [mcpServerStatus, setMcpServerStatus] = useState<McpServerStatus>({ running: false });
+  const [mcpServerBusy, setMcpServerBusy] = useState(false);
   const [runtimePath, setRuntimePath] = useState("");
   const [systemLogPath, setSystemLogPath] = useState("");
   const mainPaneRef = useRef<HTMLElement | null>(null);
   const logsListRef = useRef<HTMLDivElement | null>(null);
   const streamBuffersRef = useRef<Record<string, string>>({});
+  const scriptDragRef = useRef<{ attachedId: string; pointerId: number } | null>(null);
 
   useEffect(() => {
     getRuntimeInfo()
@@ -178,6 +196,16 @@ function MainApp() {
         const message = String(reason);
         setError(message);
         void logSystemEvent({ level: "error", target: "frontend", message: "Failed to load app data.", details: message });
+      });
+  }, []);
+
+  useEffect(() => {
+    getMcpServerStatus()
+      .then(setMcpServerStatus)
+      .catch((reason) => {
+        const message = String(reason);
+        setError(`MCP status error: ${message}`);
+        void logSystemEvent({ level: "error", target: "frontend", message: "Failed to read MCP server status.", details: message });
       });
   }, []);
 
@@ -233,10 +261,26 @@ function MainApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runningExecution]);
 
+  useEffect(() => {
+    if (runningExecution || queuedScripts.length === 0) {
+      return;
+    }
+    const [nextScript, ...remaining] = queuedScripts;
+    setQueuedScripts(remaining);
+    void executeQueuedScript(nextScript);
+    // Queue execution intentionally reacts to the current data snapshot after the previous run ends.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runningExecution, queuedScripts, data]);
+
   const activeWorkspace = useMemo(
     () => data.workspaces.find((workspace) => workspace.id === data.activeTabId) ?? data.workspaces[0],
     [data.activeTabId, data.workspaces]
   );
+  const workspaceTabTitle = (workspace: WorkspaceTab) => workspace.connection.name.trim() || workspace.title || "New Workspace";
+  const connectionTitle = activeWorkspace.connection.name.trim() || activeWorkspace.connection.host || "No connection configured";
+  const connectionSubtitle = activeWorkspace.connection.host
+    ? `${activeWorkspace.connection.username}@${activeWorkspace.connection.host}:${activeWorkspace.connection.port}`
+    : "No host configured";
   const visibleLogs = useMemo(() => filterLogsByLevel(activeWorkspace?.logs ?? [], logLevelFilter), [activeWorkspace?.logs, logLevelFilter]);
   const latestLogId = activeWorkspace?.logs.at(-1)?.id;
 
@@ -269,6 +313,89 @@ function MainApp() {
       ...current,
       workspaces: current.workspaces.map((workspace) => (workspace.id === current.activeTabId ? updater(workspace) : workspace))
     }));
+  }
+
+  function reorderAttachedScript(draggedId: string, targetId: string, position: DropPosition) {
+    if (draggedId === targetId || runningExecution) {
+      return;
+    }
+    updateActiveWorkspace((workspace) => {
+      const fromIndex = workspace.attachedScripts.findIndex((attached) => attached.id === draggedId);
+      const toIndex = workspace.attachedScripts.findIndex((attached) => attached.id === targetId);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+        return workspace;
+      }
+      const attachedScripts = [...workspace.attachedScripts];
+      const [moved] = attachedScripts.splice(fromIndex, 1);
+      const rawInsertIndex = position === "after" ? toIndex + 1 : toIndex;
+      const insertIndex = fromIndex < rawInsertIndex ? rawInsertIndex - 1 : rawInsertIndex;
+      attachedScripts.splice(Math.max(0, Math.min(insertIndex, attachedScripts.length)), 0, moved);
+      return { ...workspace, attachedScripts };
+    });
+  }
+
+  function getScriptRowAtPoint(clientX: number, clientY: number) {
+    return document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-attached-script-id]") ?? null;
+  }
+
+  function getDropPosition(row: HTMLElement, clientY: number): DropPosition {
+    const rect = row.getBoundingClientRect();
+    return clientY < rect.top + rect.height / 2 ? "before" : "after";
+  }
+
+  function resetScriptDrag() {
+    scriptDragRef.current = null;
+    setDraggingAttachedId(null);
+    setDragOverAttachedId(null);
+    setDragOverPosition(null);
+  }
+
+  function startScriptDrag(event: ReactPointerEvent<HTMLDivElement>, attachedId: string) {
+    if (runningExecution || event.button !== 0) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    scriptDragRef.current = { attachedId, pointerId: event.pointerId };
+    setDraggingAttachedId(attachedId);
+    setDragOverAttachedId(null);
+    setDragOverPosition(null);
+  }
+
+  function moveScriptDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    const activeDrag = scriptDragRef.current;
+    if (!activeDrag || activeDrag.pointerId !== event.pointerId || runningExecution) {
+      return;
+    }
+    event.preventDefault();
+    const row = getScriptRowAtPoint(event.clientX, event.clientY);
+    const targetId = row?.dataset.attachedScriptId;
+    if (!row || !targetId || targetId === activeDrag.attachedId) {
+      setDragOverAttachedId(null);
+      setDragOverPosition(null);
+      return;
+    }
+    setDragOverAttachedId(targetId);
+    setDragOverPosition(getDropPosition(row, event.clientY));
+  }
+
+  function endScriptDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    const activeDrag = scriptDragRef.current;
+    if (!activeDrag || activeDrag.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    const row = getScriptRowAtPoint(event.clientX, event.clientY);
+    const targetId = row?.dataset.attachedScriptId;
+    if (row && targetId && targetId !== activeDrag.attachedId) {
+      reorderAttachedScript(activeDrag.attachedId, targetId, getDropPosition(row, event.clientY));
+    }
+    resetScriptDrag();
   }
 
   function clampLogsPanelHeight(nextHeight: number) {
@@ -337,6 +464,11 @@ function MainApp() {
     setLogLevelFilter((current) => ({ ...current, [level]: checked }));
   }
 
+  function scriptDisplayName(script: GlobalScript | undefined, attached: AttachedScript) {
+    const tag = attached.tag?.trim() || DEFAULT_SCRIPT_TAG;
+    return `${script?.name ?? "Missing global script"} (${tag})`;
+  }
+
   async function openRuntimePath() {
     try {
       await openWorkingDataDir();
@@ -344,6 +476,29 @@ function MainApp() {
       const message = String(reason);
       setError(`Could not open working directory: ${message}`);
       void logSystemEvent({ level: "error", target: "frontend", message: "Failed to open working directory.", details: message });
+    }
+  }
+
+  async function toggleMcpServer() {
+    if (mcpServerBusy) {
+      return;
+    }
+    setMcpServerBusy(true);
+    try {
+      const nextStatus = mcpServerStatus.running ? await stopMcpServer() : await startMcpServer();
+      setMcpServerStatus(nextStatus);
+      void logSystemEvent({
+        level: "info",
+        target: "frontend",
+        message: nextStatus.running ? "MCP server enabled from UI." : "MCP server disabled from UI.",
+        details: nextStatus.url
+      });
+    } catch (reason) {
+      const message = String(reason);
+      setError(`MCP server error: ${message}`);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to toggle MCP server.", details: message });
+    } finally {
+      setMcpServerBusy(false);
     }
   }
 
@@ -381,33 +536,34 @@ function MainApp() {
     }
   }
 
-  async function execute(attached: AttachedScript, script: GlobalScript | undefined) {
-    if (!script || runningExecution?.attachedScriptId === attached.id) {
-      return;
+  async function execute(workspace: WorkspaceTab, attached: AttachedScript, script: GlobalScript | undefined) {
+    if (!script || runningExecution) {
+      return false;
     }
 
     const executionId = createId("execution");
     const execution: RunningExecution = {
       executionId,
-      workspaceId: activeWorkspace.id,
+      workspaceId: workspace.id,
       attachedScriptId: attached.id,
-      scriptName: script.name
+      scriptName: scriptDisplayName(script, attached)
     };
     setRunningExecution(execution);
-    delete streamBuffersRef.current[`${activeWorkspace.id}:${attached.id}:stdout`];
-    delete streamBuffersRef.current[`${activeWorkspace.id}:${attached.id}:stderr`];
-    appendLog(activeWorkspace.id, {
+    delete streamBuffersRef.current[`${workspace.id}:${attached.id}:stdout`];
+    delete streamBuffersRef.current[`${workspace.id}:${attached.id}:stderr`];
+    appendLog(workspace.id, {
       level: "info",
-      message: `starting ${script.name}`,
+      message: `starting ${scriptDisplayName(script, attached)}`,
       scriptId: attached.id,
       status: "starting"
     });
 
     try {
-      await runScript({ executionId, workspaceId: activeWorkspace.id, attachedScriptId: attached.id });
+      await runScript({ executionId, workspaceId: workspace.id, attachedScriptId: attached.id });
+      return true;
     } catch (reason) {
-      flushStreamBuffer(activeWorkspace.id, attached.id, "stdout", "failed");
-      flushStreamBuffer(activeWorkspace.id, attached.id, "stderr", "failed");
+      flushStreamBuffer(workspace.id, attached.id, "stdout", "failed");
+      flushStreamBuffer(workspace.id, attached.id, "stderr", "failed");
       setRunningExecution(null);
       void logSystemEvent({
         level: "error",
@@ -415,14 +571,46 @@ function MainApp() {
         message: "Script execution failed in UI flow.",
         details: String(reason)
       });
-      appendLog(activeWorkspace.id, {
+      appendLog(workspace.id, {
         level: "error",
         message: String(reason),
         scriptId: attached.id,
         status: "failed"
       });
       setStoppingScriptId(null);
+      return false;
     }
+  }
+
+  async function executeQueuedScript(item: QueuedScript) {
+    const workspace = data.workspaces.find((candidate) => candidate.id === item.workspaceId);
+    const attached = workspace?.attachedScripts.find((candidate) => candidate.id === item.attachedScriptId);
+    const script = data.globalScripts.find((candidate) => candidate.id === attached?.globalScriptId);
+    if (!workspace || !attached || !script) {
+      if (workspace) {
+        appendLog(workspace.id, {
+          level: "error",
+          message: "Queued script could not be started because its attachment or global script is missing.",
+          scriptId: item.attachedScriptId,
+          status: "failed"
+        });
+      }
+      return false;
+    }
+    return execute(workspace, attached, script);
+  }
+
+  function runSelectedScriptsSequentially() {
+    if (runningExecution) {
+      return;
+    }
+    const selected = activeWorkspace.attachedScripts
+      .filter((attached) => attached.selected)
+      .map((attached) => ({ workspaceId: activeWorkspace.id, attachedScriptId: attached.id }));
+    if (selected.length === 0) {
+      return;
+    }
+    setQueuedScripts(selected);
   }
 
   async function stopExecution(attached: AttachedScript) {
@@ -430,6 +618,7 @@ function MainApp() {
       return;
     }
 
+    setQueuedScripts([]);
     setStoppingScriptId(attached.id);
     appendLog(activeWorkspace.id, {
       level: "warn",
@@ -463,18 +652,19 @@ function MainApp() {
     }
 
     const executionId = createId("execution");
+    const displayName = scriptDisplayName(script, attached);
     const params = new globalThis.URLSearchParams({
       view: "script-log",
       executionId,
       workspaceId: activeWorkspace.id,
       attachedScriptId: attached.id,
-      scriptName: script.name,
+      scriptName: displayName,
       workspaceTitle: activeWorkspace.title
     });
     const label = `script_logs_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
     const logWindow = new WebviewWindow(label, {
       url: `index.html?${params.toString()}`,
-      title: `${script.name} logs`,
+      title: `${displayName} logs`,
       width: 980,
       height: 680,
       minWidth: 620,
@@ -517,6 +707,9 @@ function MainApp() {
       });
       setRunningExecution(null);
       setStoppingScriptId(null);
+      if (status === "cancelled") {
+        setQueuedScripts([]);
+      }
     }
   }
 
@@ -552,11 +745,11 @@ function MainApp() {
             onDoubleClick={() => renameTab(workspace.id)}
             title="Double-click to rename"
           >
-            <span>{workspace.title || workspace.connection.name || workspace.connection.host || "Workspace"}</span>
+            <span>{workspaceTabTitle(workspace)}</span>
             <span
               role="button"
               tabIndex={0}
-              aria-label={`Close tab ${workspace.title}`}
+              aria-label={`Close tab ${workspaceTabTitle(workspace)}`}
               title="Close tab"
               className="tabClose"
               onClick={(event) => {
@@ -574,9 +767,22 @@ function MainApp() {
             </span>
           </button>
         ))}
-        <button type="button" className="newTabButton" onClick={addTab} aria-label="Add tab" title="Add">
-          <CirclePlus size={17} /> Add
-        </button>
+        <div className="tabStripActions">
+          <button type="button" className="newTabButton" onClick={addTab} aria-label="Add tab" title="Add">
+            <CirclePlus size={17} /> Add
+          </button>
+          <button
+            type="button"
+            className="mcpToggle"
+            onClick={() => void toggleMcpServer()}
+            disabled={mcpServerBusy}
+            title={mcpServerStatus.running ? `MCP server is running\n${mcpServerStatus.url}` : "Start MCP server"}
+            aria-label={mcpServerStatus.running ? "Stop MCP server" : "Start MCP server"}
+            aria-pressed={mcpServerStatus.running}
+          >
+            <Server size={17} /> MCP
+          </button>
+        </div>
       </header>
 
       <main
@@ -607,8 +813,8 @@ function MainApp() {
 
         <section className="scriptsPanel" aria-label="Attached scripts">
           <div className="sectionHeading">
-            <h1>{activeWorkspace.title}</h1>
-            <span>{activeWorkspace.connection.host || "No host configured"}</span>
+            <h1>{connectionTitle}</h1>
+            <span>{connectionSubtitle}</span>
           </div>
           <div className="scriptRows">
             {activeWorkspace.attachedScripts.length === 0 && <div className="emptyState">No scripts attached.</div>}
@@ -619,7 +825,23 @@ function MainApp() {
               const isBlockedByAnotherScript = isAnyScriptRunning && !isRunning;
               const isStopping = stoppingScriptId === attached.id;
               return (
-                <article className={`scriptRow ${attached.selected ? "selected" : ""}`} key={attached.id}>
+                <article
+                  className={`scriptRow ${attached.selected ? "selected" : ""} ${draggingAttachedId === attached.id ? "dragging" : ""} ${dragOverAttachedId === attached.id ? `dropTarget drop-${dragOverPosition}` : ""}`}
+                  key={attached.id}
+                  data-attached-script-id={attached.id}
+                >
+                  <div
+                    className="dragHandle"
+                    title={isAnyScriptRunning ? "Reordering is disabled while a script is running" : "Drag to reorder"}
+                    aria-label={`Drag ${scriptDisplayName(script, attached)} to reorder`}
+                    aria-disabled={isAnyScriptRunning}
+                    onPointerDown={(event) => startScriptDrag(event, attached.id)}
+                    onPointerMove={moveScriptDrag}
+                    onPointerUp={endScriptDrag}
+                    onPointerCancel={resetScriptDrag}
+                  >
+                    <GripVertical size={16} />
+                  </div>
                   <label className="selectCell">
                     <input
                       type="checkbox"
@@ -636,14 +858,14 @@ function MainApp() {
                     <span className="srOnly">Selection state for removal</span>
                   </label>
                   <div className="scriptSummary">
-                    <strong>{script?.name ?? "Missing global script"}</strong>
+                    <strong>{scriptDisplayName(script, attached)}</strong>
                     {attached.useInMcp && <small>Use in MCP enabled</small>}
                   </div>
                   <div className="rowActions">
                     <button
                       type="button"
                       title="Script settings"
-                      aria-label={`Settings for ${script?.name ?? "missing script"}`}
+                      aria-label={`Settings for ${scriptDisplayName(script, attached)}`}
                       disabled={!script}
                       onClick={() => setModal({ kind: "scriptSettings", attachedScriptId: attached.id })}
                     >
@@ -653,9 +875,11 @@ function MainApp() {
                       type="button"
                       className="primaryButton"
                       title={isRunning ? "Running" : isBlockedByAnotherScript ? "Blocked while another script is running" : "Run"}
-                      aria-label={`Run ${script?.name ?? "missing script"}`}
+                      aria-label={`Run ${scriptDisplayName(script, attached)}`}
                       disabled={!script || isAnyScriptRunning}
-                      onClick={() => execute(attached, script)}
+                      onClick={() => {
+                        void execute(activeWorkspace, attached, script);
+                      }}
                     >
                       <Play size={16} />
                     </button>
@@ -664,7 +888,7 @@ function MainApp() {
                         type="button"
                         className="dangerButton"
                         title={isStopping ? "Stopping" : "Stop"}
-                        aria-label={`Stop ${script?.name ?? "running script"}`}
+                        aria-label={`Stop ${scriptDisplayName(script, attached)}`}
                         disabled={isStopping}
                         onClick={() => stopExecution(attached)}
                       >
@@ -673,8 +897,8 @@ function MainApp() {
                     )}
                     <button
                       type="button"
-                      title="Запуск в новом окне"
-                      aria-label={`Запуск ${script?.name ?? "missing script"} в новом окне`}
+                      title="Run in new window"
+                      aria-label={`Open ${scriptDisplayName(script, attached)} in a new log window`}
                       disabled={!script}
                       onClick={() => {
                         void openScriptLogWindow(attached, script);
@@ -688,6 +912,16 @@ function MainApp() {
             })}
           </div>
           <div className="listControls">
+            <button
+              type="button"
+              className="primaryButton"
+              title="Run selected scripts sequentially"
+              aria-label="Run selected scripts sequentially"
+              disabled={Boolean(runningExecution) || activeWorkspace.attachedScripts.every((attached) => !attached.selected)}
+              onClick={runSelectedScriptsSequentially}
+            >
+              <Play size={17} /> Play
+            </button>
             <button type="button" onClick={() => setModal({ kind: "addScripts" })} title="Add" aria-label="Add scripts">
               <Plus size={17} /> Add
             </button>
@@ -776,6 +1010,7 @@ function MainApp() {
         <Modal title="Connection Settings" onClose={() => setModal({ kind: "none" })} width="wide">
           <ConnectionSettings
             connection={activeWorkspace.connection}
+            connections={data.workspaces.map((workspace) => workspace.connection)}
             busy={busy}
             onCancel={() => setModal({ kind: "none" })}
             onTest={async (connection, secrets) => {
@@ -785,6 +1020,7 @@ function MainApp() {
                 setData(nextData);
                 const message = await testConnection(activeWorkspace.id);
                 appendLog(activeWorkspace.id, { level: "info", message, status: "connected" });
+                return message;
               } catch (reason) {
                 void logSystemEvent({
                   level: "error",
@@ -793,6 +1029,7 @@ function MainApp() {
                   details: String(reason)
                 });
                 appendLog(activeWorkspace.id, { level: "error", message: String(reason), status: "failed" });
+                throw reason;
               } finally {
                 setBusy(false);
               }
@@ -832,22 +1069,22 @@ function MainApp() {
         <Modal title="Add Scripts" onClose={() => setModal({ kind: "none" })}>
           <AddScriptsDialog
             scripts={data.globalScripts}
-            attachedScriptIds={activeWorkspace.attachedScripts.map((attached) => attached.globalScriptId)}
+            attachedScripts={activeWorkspace.attachedScripts}
             onCancel={() => setModal({ kind: "none" })}
-            onAdd={(scriptIds) => {
+            onAdd={(scriptId, tag) => {
               updateActiveWorkspace((workspace) => ({
                 ...workspace,
                 attachedScripts: [
                   ...workspace.attachedScripts,
-                  ...scriptIds.map((scriptId) => ({
+                  {
                     id: createId("attached"),
                     globalScriptId: scriptId,
+                    tag,
                     parameterSettings: {},
                     useInMcp: false
-                  }))
+                  }
                 ]
               }));
-              setModal({ kind: "none" });
             }}
           />
         </Modal>
@@ -865,6 +1102,7 @@ function MainApp() {
               <ScriptSettings
                 script={script}
                 attached={attached}
+                workspaceAttachedScripts={activeWorkspace.attachedScripts}
                 onCancel={() => setModal({ kind: "none" })}
                 onSave={(nextAttached) => {
                   updateActiveWorkspace((workspace) => ({

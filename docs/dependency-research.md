@@ -13,7 +13,8 @@ Selected libraries:
 - Vite for frontend development and build.
 - `lucide-react` for accessible toolbar/action icons.
 - Rust `ssh2` for SSH command execution.
-- Rust `keyring` for secure credential storage.
+- Rust `windows-sys` for direct Windows Credential Manager integration.
+- Rust `keyring` for secure credential storage on non-Windows platforms and legacy migration fallback.
 - MCP TypeScript SDK for stdio server integration.
 - Vitest for fast unit tests around parsing, storage, command construction, and MCP registry behavior.
 
@@ -21,5 +22,5 @@ Important notes:
 
 - Tauri command invocation uses `invoke` from `@tauri-apps/api/core`.
 - Tauri backend state should be wrapped in `Mutex` for command access.
-- MCP tools are stdio-local by default; this matches the security model better than a public HTTP listener.
-- True live SSH streaming should use Tauri events or channels in a future iteration.
+- MCP clients talk to a stdio wrapper; the wrapper talks to the desktop app through a loopback-only HTTP bridge.
+- Live SSH output is streamed through backend event queues polled by the frontend.

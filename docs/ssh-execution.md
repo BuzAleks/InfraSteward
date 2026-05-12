@@ -14,6 +14,8 @@ INFRAS_EOF
 
 Single quotes in values are escaped using the standard POSIX `'"'"'` pattern. If `Use from environment` is enabled, the variable is not passed manually. If a manual value is empty, it is not passed manually.
 
-The first implementation reads stdout and stderr after command completion. The UI records stdout, stderr, status, and exit code. A future improvement should emit Tauri events for true live streaming and cancellation.
+Stdout and stderr are streamed while the command runs. The UI records lifecycle events, output chunks, status, and exit code. Cancellation closes the SSH channel and marks the run as `cancelled`; execution timeout closes the channel and returns `timeout`.
+
+Main-window execution blocks other main-window script starts while one script is running. Separate log windows can start independent executions in parallel.
 
 The remote target is assumed to have `bash`. Unix-like SSH targets are the intended MVP target. Host key verification is not yet strict and should be improved before high-risk use.
