@@ -25,4 +25,10 @@ describe("prepareRemoteCommand", () => {
     expect(prepared.command).toContain("APP_DIR='/srv/app' LOCAL_TOKEN='from-local-env' bash -s <<'INFRAS_EOF'");
     expect(prepared.command).toContain("echo ${APP_DIR} ${LOCAL_TOKEN} ${REMOTE_ONLY}");
   });
+
+  it("changes into the configured working directory before running", () => {
+    const prepared = prepareRemoteCommand("pwd", {}, "bash", {}, "/opt/my app");
+
+    expect(prepared.command).toContain("cd '/opt/my app' && bash -s <<'INFRAS_EOF'");
+  });
 });

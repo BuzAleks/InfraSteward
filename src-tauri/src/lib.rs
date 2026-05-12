@@ -7,7 +7,7 @@ use std::{
     net::{TcpListener, TcpStream},
     panic,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -44,6 +44,7 @@ const MCP_BRIDGE_PORT: u16 = 47321;
 const MCP_TIMEOUT_PARAMETER: &str = "timeoutSeconds";
 const MCP_DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const MCP_MAX_TIMEOUT_SECONDS: u64 = 60;
+const LOCAL_WORKSPACE_ID: &str = "workspace_local";
 
 type SharedAppData = Mutex<AppData>;
 type ActiveExecutions = Mutex<HashMap<String, ActiveExecution>>;
@@ -97,7 +98,11 @@ pub struct GlobalScript {
 pub struct WorkspaceTab {
     id: String,
     title: String,
+    #[serde(default = "default_workspace_kind")]
+    kind: WorkspaceKind,
     connection: SshConnectionConfig,
+    #[serde(default = "default_local_runner")]
+    local_runner: LocalRunnerConfig,
     #[serde(default)]
     parameter_settings: HashMap<String, ScriptParameterSetting>,
     attached_scripts: Vec<AttachedScript>,
@@ -127,6 +132,34 @@ pub struct ScriptParameterSetting {
     use_workspace_value: Option<bool>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceKind {
+    Local,
+    Ssh,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunnerConfig {
+    kind: LocalRunnerKind,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    working_directory: Option<String>,
+    execution_timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalRunnerKind {
+    Bash,
+    Sh,
+    Zsh,
+    GitBash,
+    Wsl,
+    Custom,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SshConnectionConfig {
@@ -140,6 +173,7 @@ pub struct SshConnectionConfig {
     private_key_path: Option<String>,
     private_key_content_ref: Option<String>,
     passphrase_ref: Option<String>,
+    working_directory: Option<String>,
     connection_timeout_seconds: Option<u64>,
     execution_timeout_seconds: Option<u64>,
 }
@@ -688,8 +722,15 @@ async fn run_script(
         }
     }
 
-    let command = prepare_remote_command(&script_content, &settings);
-    let connection = workspace.connection;
+    let command = prepare_remote_command(
+        &script_content,
+        &settings,
+        workspace.connection.working_directory.as_deref(),
+    );
+    let local_environment = parameter_environment(&settings);
+    let connection = workspace.connection.clone();
+    let local_runner = workspace.local_runner.clone();
+    let workspace_kind = workspace.kind.clone();
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let events = Arc::new(Mutex::new(VecDeque::new()));
     let finished = Arc::new(AtomicBool::new(false));
@@ -717,8 +758,12 @@ async fn run_script(
             background_execution_id,
             workspace_id,
             attached_script_id,
+            workspace_kind,
             connection,
+            local_runner,
             command,
+            script_content,
+            local_environment,
             cancel_flag,
             events,
             finished,
@@ -791,22 +836,38 @@ fn run_script_blocking(
     execution_id: String,
     workspace_id: String,
     attached_script_id: String,
+    workspace_kind: WorkspaceKind,
     connection: SshConnectionConfig,
+    local_runner: LocalRunnerConfig,
     command: String,
+    script_content: String,
+    local_environment: HashMap<String, String>,
     cancel_flag: Arc<AtomicBool>,
     events: Arc<Mutex<VecDeque<ScriptExecutionEvent>>>,
     finished: Arc<AtomicBool>,
 ) {
-    let result = execute_ssh_command(
-        &app,
-        &connection,
-        &execution_id,
-        &workspace_id,
-        &attached_script_id,
-        &command,
-        &cancel_flag,
-        &events,
-    );
+    let result = match &workspace_kind {
+        WorkspaceKind::Local => execute_local_script(
+            &local_runner,
+            &script_content,
+            &local_environment,
+            &execution_id,
+            &workspace_id,
+            &attached_script_id,
+            &cancel_flag,
+            &events,
+        ),
+        WorkspaceKind::Ssh => execute_ssh_command(
+            &app,
+            &connection,
+            &execution_id,
+            &workspace_id,
+            &attached_script_id,
+            &command,
+            &cancel_flag,
+            &events,
+        ),
+    };
     match &result {
         Ok(execution) => write_system_log(
             &app,
@@ -815,7 +876,10 @@ fn run_script_blocking(
                 "cancelled" => "warn",
                 _ => "error",
             },
-            "ssh",
+            match workspace_kind {
+                WorkspaceKind::Local => "local",
+                WorkspaceKind::Ssh => "ssh",
+            },
             "Script execution finished.",
             Some(format!(
                 "workspaceId={} attachedScriptId={} status={} exitCode={:?}",
@@ -825,7 +889,10 @@ fn run_script_blocking(
         Err(err) => write_system_log(
             &app,
             "error",
-            "ssh",
+            match workspace_kind {
+                WorkspaceKind::Local => "local",
+                WorkspaceKind::Ssh => "ssh",
+            },
             "Script execution failed.",
             Some(err.to_string()),
         ),
@@ -1149,6 +1216,250 @@ fn read_channel_stream<R: Read>(
     }
 }
 
+fn execute_local_script(
+    runner: &LocalRunnerConfig,
+    script_content: &str,
+    environment: &HashMap<String, String>,
+    execution_id: &str,
+    workspace_id: &str,
+    attached_script_id: &str,
+    cancel_flag: &AtomicBool,
+    events: &Arc<Mutex<VecDeque<ScriptExecutionEvent>>>,
+) -> Result<ExecutionResult, InfraError> {
+    let resolved = resolve_local_runner(runner)?;
+    let mut child_command = Command::new(&resolved.command);
+    child_command.args(&resolved.args);
+    child_command.stdin(Stdio::piped());
+    child_command.stdout(Stdio::piped());
+    child_command.stderr(Stdio::piped());
+    if let Some(directory) = runner
+        .working_directory
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        child_command.current_dir(directory);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        child_command.process_group(0);
+    }
+
+    let mut child = child_command
+        .spawn()
+        .map_err(|err| InfraError::Validation(format!("Could not start local runner '{}': {err}", resolved.command)))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let script = local_script_with_environment(script_content, environment);
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|err| InfraError::Storage(err.to_string()))?;
+    }
+
+    let stdout = Arc::new(Mutex::new(String::new()));
+    let stderr = Arc::new(Mutex::new(String::new()));
+    let stdout_handle = child.stdout.take().map(|stream| {
+        spawn_local_stream_reader(
+            stream,
+            "stdout",
+            execution_id,
+            workspace_id,
+            attached_script_id,
+            events,
+            stdout.clone(),
+        )
+    });
+    let stderr_handle = child.stderr.take().map(|stream| {
+        spawn_local_stream_reader(
+            stream,
+            "stderr",
+            execution_id,
+            workspace_id,
+            attached_script_id,
+            events,
+            stderr.clone(),
+        )
+    });
+
+    let timeout = Duration::from_secs(runner.execution_timeout_seconds.unwrap_or(300));
+    let deadline = Instant::now() + timeout;
+
+    let (status, exit_code) = loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            terminate_local_child(&mut child);
+            break ("cancelled".into(), None);
+        }
+        if Instant::now() >= deadline {
+            terminate_local_child(&mut child);
+            if let Ok(mut stderr_text) = stderr.lock() {
+                if !stderr_text.is_empty() && !stderr_text.ends_with('\n') {
+                    stderr_text.push('\n');
+                }
+                stderr_text.push_str(&format!("Script timed out after {} seconds.", timeout.as_secs()));
+            }
+            break ("timeout".into(), None);
+        }
+        match child
+            .try_wait()
+            .map_err(|err| InfraError::Storage(err.to_string()))?
+        {
+            Some(exit) => {
+                break (
+                    if exit.success() { "success" } else { "failed" }.into(),
+                    exit.code(),
+                );
+            }
+            None => thread::sleep(Duration::from_millis(25)),
+        }
+    };
+
+    if let Some(handle) = stdout_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
+    }
+
+    Ok(ExecutionResult {
+        status,
+        stdout: stdout.lock().map(|value| value.clone()).unwrap_or_default(),
+        stderr: stderr.lock().map(|value| value.clone()).unwrap_or_default(),
+        exit_code,
+    })
+}
+
+struct ResolvedLocalRunner {
+    command: String,
+    args: Vec<String>,
+}
+
+fn resolve_local_runner(runner: &LocalRunnerConfig) -> Result<ResolvedLocalRunner, InfraError> {
+    let configured_args = runner.args.clone().unwrap_or_default();
+    let command = runner.command.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let default = match runner.kind {
+        LocalRunnerKind::Bash => ("bash".to_string(), vec!["-s".to_string()]),
+        LocalRunnerKind::Sh => ("sh".to_string(), vec!["-s".to_string()]),
+        LocalRunnerKind::Zsh => ("zsh".to_string(), vec!["-s".to_string()]),
+        LocalRunnerKind::GitBash => (command.map(str::to_string).unwrap_or_else(default_git_bash_command), vec!["-s".to_string()]),
+        LocalRunnerKind::Wsl => (
+            command.map(str::to_string).unwrap_or_else(|| "wsl.exe".into()),
+            vec!["--".to_string(), "bash".to_string(), "-s".to_string()],
+        ),
+        LocalRunnerKind::Custom => (
+            command
+                .map(str::to_string)
+                .ok_or_else(|| InfraError::Validation("Custom local runner command is required.".into()))?,
+            Vec::new(),
+        ),
+    };
+    Ok(ResolvedLocalRunner {
+        command: default.0,
+        args: if configured_args.is_empty() { default.1 } else { configured_args },
+    })
+}
+
+fn default_git_bash_command() -> String {
+    #[cfg(windows)]
+    {
+        let candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ];
+        for candidate in candidates {
+            if Path::new(candidate).exists() {
+                return candidate.into();
+            }
+        }
+        "bash.exe".into()
+    }
+    #[cfg(not(windows))]
+    {
+        "bash".into()
+    }
+}
+
+fn local_script_with_environment(script_content: &str, environment: &HashMap<String, String>) -> String {
+    let mut prefix = String::new();
+    for (name, value) in environment {
+        prefix.push_str(&format!("export {name}={}\n", shell_single_quote(value)));
+    }
+    format!("{prefix}{script_content}\n")
+}
+
+fn spawn_local_stream_reader<R: Read + Send + 'static>(
+    mut stream: R,
+    stream_name: &'static str,
+    execution_id: &str,
+    workspace_id: &str,
+    attached_script_id: &str,
+    events: &Arc<Mutex<VecDeque<ScriptExecutionEvent>>>,
+    output: Arc<Mutex<String>>,
+) -> JoinHandle<()> {
+    let execution_id = execution_id.to_string();
+    let workspace_id = workspace_id.to_string();
+    let attached_script_id = attached_script_id.to_string();
+    let events = events.clone();
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let chunk = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    if let Ok(mut output) = output.lock() {
+                        output.push_str(&chunk);
+                    }
+                    push_execution_event(
+                        &events,
+                        ScriptExecutionEvent {
+                            kind: "output".into(),
+                            execution_id: execution_id.clone(),
+                            workspace_id: workspace_id.clone(),
+                            attached_script_id: attached_script_id.clone(),
+                            stream: Some(stream_name.into()),
+                            chunk: Some(chunk),
+                            status: None,
+                            exit_code: None,
+                            message: None,
+                        },
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn terminate_local_child(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        thread::sleep(Duration::from_millis(150));
+        let _ = Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn push_execution_event(
     events: &Arc<Mutex<VecDeque<ScriptExecutionEvent>>>,
     event: ScriptExecutionEvent,
@@ -1161,31 +1472,41 @@ fn push_execution_event(
 fn prepare_remote_command(
     script_content: &str,
     settings: &HashMap<String, ScriptParameterSetting>,
+    working_directory: Option<&str>,
 ) -> String {
-    let env_prefix = settings
-        .iter()
-        .filter_map(|(name, setting)| {
-            if setting.use_from_environment {
-                return std::env::var(name).ok().map(|value| (name, value));
-            }
-            if setting.value.is_empty() {
-                return None;
-            }
-            Some((name, setting.value.clone()))
-        })
+    let env_prefix = parameter_environment(settings)
+        .into_iter()
         .map(|(name, value)| format!("{name}={}", shell_single_quote(&value)))
         .collect::<Vec<_>>()
         .join(" ");
 
-    format!(
-        "{}bash -s <<'INFRAS_EOF'\n{}\nINFRAS_EOF",
-        if env_prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{env_prefix} ")
-        },
-        script_content
-    )
+    let cd_prefix = working_directory
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|directory| format!("cd {} && ", shell_single_quote(directory)))
+        .unwrap_or_default();
+    let env_prefix = if env_prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{env_prefix} ")
+    };
+
+    format!("{cd_prefix}{env_prefix}bash -s <<'INFRAS_EOF'\n{script_content}\nINFRAS_EOF")
+}
+
+fn parameter_environment(settings: &HashMap<String, ScriptParameterSetting>) -> HashMap<String, String> {
+    settings
+        .iter()
+        .filter_map(|(name, setting)| {
+            if setting.use_from_environment {
+                return std::env::var(name).ok().map(|value| (name.clone(), value));
+            }
+            if setting.value.is_empty() {
+                return None;
+            }
+            Some((name.clone(), setting.value.clone()))
+        })
+        .collect()
 }
 
 fn parameter_settings_for_script(
@@ -1349,10 +1670,11 @@ fn normalize_app_data(mut data: AppData) -> AppData {
         }
     }
     if data.workspaces.is_empty() {
-        let workspace = default_workspace();
+        let workspace = default_local_workspace();
         data.active_tab_id = workspace.id.clone();
         data.workspaces.push(workspace);
     }
+    ensure_local_workspace(&mut data);
     if !data
         .workspaces
         .iter()
@@ -1361,6 +1683,11 @@ fn normalize_app_data(mut data: AppData) -> AppData {
         data.active_tab_id = data.workspaces[0].id.clone();
     }
     for workspace in &mut data.workspaces {
+        if matches!(workspace.kind, WorkspaceKind::Local) {
+            workspace.id = LOCAL_WORKSPACE_ID.into();
+            workspace.title = "LOCAL".into();
+            workspace.connection = local_workspace_connection();
+        }
         sync_workspace_parameter_settings(workspace, &data.global_scripts);
         for attached in &mut workspace.attached_scripts {
             if attached.tag.trim().is_empty() {
@@ -1383,8 +1710,31 @@ fn default_script_tag() -> String {
     "default".into()
 }
 
+fn default_workspace_kind() -> WorkspaceKind {
+    WorkspaceKind::Ssh
+}
+
+fn default_local_runner() -> LocalRunnerConfig {
+    #[cfg(windows)]
+    let kind = LocalRunnerKind::GitBash;
+    #[cfg(target_os = "macos")]
+    let kind = LocalRunnerKind::Zsh;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let kind = LocalRunnerKind::Bash;
+    #[cfg(not(any(windows, unix)))]
+    let kind = LocalRunnerKind::Custom;
+
+    LocalRunnerConfig {
+        kind,
+        command: None,
+        args: None,
+        working_directory: None,
+        execution_timeout_seconds: Some(300),
+    }
+}
+
 fn default_app_data() -> AppData {
-    let workspace = default_workspace();
+    let workspace = default_local_workspace();
     AppData {
         schema_version: SCHEMA_VERSION,
         active_tab_id: workspace.id.clone(),
@@ -1393,28 +1743,59 @@ fn default_app_data() -> AppData {
     }
 }
 
-fn default_workspace() -> WorkspaceTab {
+fn default_local_workspace() -> WorkspaceTab {
     WorkspaceTab {
-        id: format!("workspace_{}", Uuid::new_v4()),
-        title: "New Workspace".into(),
-        connection: SshConnectionConfig {
-            id: format!("conn_{}", Uuid::new_v4()),
-            name: String::new(),
-            host: String::new(),
-            port: 22,
-            username: String::new(),
-            auth_type: AuthType::PrivateKey,
-            password_ref: None,
-            private_key_path: None,
-            private_key_content_ref: None,
-            passphrase_ref: None,
-            connection_timeout_seconds: Some(15),
-            execution_timeout_seconds: Some(300),
-        },
+        id: LOCAL_WORKSPACE_ID.into(),
+        title: "LOCAL".into(),
+        kind: WorkspaceKind::Local,
+        connection: local_workspace_connection(),
+        local_runner: default_local_runner(),
         parameter_settings: HashMap::new(),
         attached_scripts: Vec::new(),
         logs: Vec::new(),
     }
+}
+
+fn local_workspace_connection() -> SshConnectionConfig {
+    SshConnectionConfig {
+        id: "conn_local".into(),
+        name: "LOCAL".into(),
+        host: String::new(),
+        port: 22,
+        username: String::new(),
+        auth_type: AuthType::PrivateKey,
+        password_ref: None,
+        private_key_path: None,
+        private_key_content_ref: None,
+        passphrase_ref: None,
+        working_directory: None,
+        connection_timeout_seconds: Some(15),
+        execution_timeout_seconds: Some(300),
+    }
+}
+
+fn ensure_local_workspace(data: &mut AppData) {
+    let local_index = data
+        .workspaces
+        .iter()
+        .position(|workspace| matches!(workspace.kind, WorkspaceKind::Local) || workspace.id == LOCAL_WORKSPACE_ID);
+    let local = local_index
+        .map(|index| data.workspaces.remove(index))
+        .unwrap_or_else(default_local_workspace);
+    data.workspaces.retain(|workspace| !matches!(workspace.kind, WorkspaceKind::Local) && workspace.id != LOCAL_WORKSPACE_ID);
+    data.workspaces.insert(
+        0,
+        WorkspaceTab {
+            id: LOCAL_WORKSPACE_ID.into(),
+            title: "LOCAL".into(),
+            kind: WorkspaceKind::Local,
+            connection: local_workspace_connection(),
+            local_runner: local.local_runner,
+            parameter_settings: local.parameter_settings,
+            attached_scripts: local.attached_scripts,
+            logs: local.logs,
+        },
+    );
 }
 
 fn sync_workspace_parameter_settings(workspace: &mut WorkspaceTab, scripts: &[GlobalScript]) -> bool {
@@ -2212,21 +2593,39 @@ fn execute_mcp_bridge_script(
             },
         );
     }
-    let command = prepare_remote_command(&script_content, &settings);
+    let command = prepare_remote_command(
+        &script_content,
+        &settings,
+        workspace.connection.working_directory.as_deref(),
+    );
+    let local_environment = parameter_environment(&settings);
     let mut connection = workspace.connection.clone();
     connection.execution_timeout_seconds = Some(timeout_seconds);
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let events = Arc::new(Mutex::new(VecDeque::new()));
-    execute_ssh_command(
-        app,
-        &connection,
-        &format!("mcp_{}", Uuid::new_v4()),
-        &request.workspace_id,
-        &request.attached_script_id,
-        &command,
-        &cancel_flag,
-        &events,
-    )
+    let execution_id = format!("mcp_{}", Uuid::new_v4());
+    match workspace.kind {
+        WorkspaceKind::Local => execute_local_script(
+            &workspace.local_runner,
+            &script_content,
+            &local_environment,
+            &execution_id,
+            &request.workspace_id,
+            &request.attached_script_id,
+            &cancel_flag,
+            &events,
+        ),
+        WorkspaceKind::Ssh => execute_ssh_command(
+            app,
+            &connection,
+            &execution_id,
+            &request.workspace_id,
+            &request.attached_script_id,
+            &command,
+            &cancel_flag,
+            &events,
+        ),
+    }
 }
 
 fn parse_mcp_timeout_seconds(value: Option<serde_json::Value>) -> Result<u64, InfraError> {

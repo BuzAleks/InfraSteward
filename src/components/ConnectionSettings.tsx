@@ -137,6 +137,14 @@ export function ConnectionSettings({ connection, connections, onCancel, onSave, 
         </>
       )}
       <label>
+        Working directory
+        <input
+          placeholder="/opt/my-app"
+          value={draft.workingDirectory ?? ""}
+          onChange={(event) => setDraft({ ...draft, workingDirectory: event.target.value })}
+        />
+      </label>
+      <label>
         Connection timeout
         <input
           type="number"

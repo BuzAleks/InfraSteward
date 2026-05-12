@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultAppData } from "./appData";
 import { collectWorkspaceParameterNames, ensureWorkspaceParameterSettings, settingsForAttachedScript } from "./workspaceParameters";
+import type { AttachedScript } from "./types";
 
 describe("workspace parameters", () => {
   it("collects unique parameters and removes parameters after detach when no script uses them", () => {
@@ -65,7 +66,7 @@ describe("workspace parameters", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z"
     };
-    const attached = {
+    const attached: AttachedScript = {
       id: "attached_1",
       globalScriptId: "script_1",
       tag: "default",

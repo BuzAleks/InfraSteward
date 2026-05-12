@@ -21,11 +21,12 @@ import {
 } from "lucide-react";
 import { AddScriptsDialog } from "./components/AddScriptsDialog";
 import { ConnectionSettings } from "./components/ConnectionSettings";
+import { LocalRunnerSettings } from "./components/LocalRunnerSettings";
 import { Modal } from "./components/Modal";
 import { ScriptManager } from "./components/ScriptManager";
 import { ScriptSettings } from "./components/ScriptSettings";
 import { WorkspaceParameters } from "./components/WorkspaceParameters";
-import { createDefaultAppData, createWorkspace, DEFAULT_SCRIPT_TAG, MAX_LOGS_PER_WORKSPACE } from "./lib/appData";
+import { createDefaultAppData, createWorkspace, DEFAULT_SCRIPT_TAG, LOCAL_WORKSPACE_ID, MAX_LOGS_PER_WORKSPACE } from "./lib/appData";
 import {
   saveAppData,
   loadAppData,
@@ -311,10 +312,16 @@ function MainApp() {
     [data.activeTabId, data.workspaces]
   );
   const workspaceTabTitle = (workspace: WorkspaceTab) => workspace.connection.name.trim() || workspace.title || "New Workspace";
-  const connectionTitle = activeWorkspace.connection.name.trim() || activeWorkspace.connection.host || "No connection configured";
-  const connectionSubtitle = activeWorkspace.connection.host
-    ? `${activeWorkspace.connection.username}@${activeWorkspace.connection.host}:${activeWorkspace.connection.port}`
-    : "No host configured";
+  const connectionTitle =
+    activeWorkspace.kind === "local"
+      ? "LOCAL"
+      : activeWorkspace.connection.name.trim() || activeWorkspace.connection.host || "No connection configured";
+  const connectionSubtitle =
+    activeWorkspace.kind === "local"
+      ? localRunnerSubtitle(activeWorkspace)
+      : activeWorkspace.connection.host
+        ? `${activeWorkspace.connection.username}@${activeWorkspace.connection.host}:${activeWorkspace.connection.port}${activeWorkspace.connection.workingDirectory ? ` in ${activeWorkspace.connection.workingDirectory}` : ""}`
+        : "No host configured";
   const visibleLogs = useMemo(() => filterLogsByLevel(activeWorkspace?.logs ?? [], logLevelFilter), [activeWorkspace?.logs, logLevelFilter]);
   const latestLogId = activeWorkspace?.logs.at(-1)?.id;
   const selectedAttachedScripts = useMemo(
@@ -389,7 +396,7 @@ function MainApp() {
     }
     if (
       nextUseInMcp &&
-      !confirm("Use in MCP allows an LLM client to execute selected scripts on the configured SSH server. Enable only for scripts you trust.")
+      !confirm("Use in MCP allows an LLM client to execute selected scripts on this workspace target. Enable only for scripts you trust.")
     ) {
       return;
     }
@@ -538,6 +545,20 @@ function MainApp() {
     return `${script?.name ?? "Missing global script"} (${tag})`;
   }
 
+  function localRunnerSubtitle(workspace: WorkspaceTab) {
+    const runner = workspace.localRunner;
+    const command = runner.command?.trim();
+    const runnerName =
+      runner.kind === "gitBash"
+        ? "Git Bash"
+        : runner.kind === "wsl"
+          ? "WSL bash"
+          : runner.kind === "custom"
+            ? command || "Custom"
+            : runner.kind;
+    return `${runnerName}${runner.workingDirectory ? ` in ${runner.workingDirectory}` : ""}`;
+  }
+
   async function openRuntimePath() {
     try {
       await openWorkingDataDir();
@@ -607,6 +628,10 @@ function MainApp() {
   }
 
   function closeTab(id: string) {
+    if (id === LOCAL_WORKSPACE_ID || data.workspaces.find((workspace) => workspace.id === id)?.kind === "local") {
+      setError("LOCAL workspace cannot be closed.");
+      return;
+    }
     if (data.workspaces.length === 1) {
       setError("At least one workspace tab is required.");
       return;
@@ -626,6 +651,9 @@ function MainApp() {
 
   function renameTab(id: string) {
     const workspace = data.workspaces.find((candidate) => candidate.id === id);
+    if (workspace?.kind === "local") {
+      return;
+    }
     const title = prompt("Name", workspace?.title ?? "");
     if (title?.trim()) {
       setData((current) => ({
@@ -845,25 +873,27 @@ function MainApp() {
             title="Double-click to rename"
           >
             <span>{workspaceTabTitle(workspace)}</span>
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label={`Close tab ${workspaceTabTitle(workspace)}`}
-              title="Close tab"
-              className="tabClose"
-              onClick={(event) => {
-                event.stopPropagation();
-                closeTab(workspace.id);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
+            {workspace.kind !== "local" && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={`Close tab ${workspaceTabTitle(workspace)}`}
+                title="Close tab"
+                className="tabClose"
+                onClick={(event) => {
+                  event.stopPropagation();
                   closeTab(workspace.id);
-                }
-              }}
-            >
-              <X size={14} />
-            </span>
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    closeTab(workspace.id);
+                  }
+                }}
+              >
+                <X size={14} />
+              </span>
+            )}
           </button>
         ))}
         <div className="tabStripActions">
@@ -891,7 +921,7 @@ function MainApp() {
       >
         <nav className="toolbar" aria-label="Main toolbar">
           <button type="button" onClick={() => setModal({ kind: "connection" })}>
-            <Settings size={17} /> Connection Settings
+            <Settings size={17} /> {activeWorkspace.kind === "local" ? "Runner Settings" : "Connection Settings"}
           </button>
           <button type="button" onClick={() => setModal({ kind: "workspaceParameters" })}>
             <SlidersHorizontal size={17} /> Workspace Parameters
@@ -1131,38 +1161,49 @@ function MainApp() {
       </main>
 
       {modal.kind === "connection" && (
-        <Modal title="Connection Settings" onClose={() => setModal({ kind: "none" })} width="wide">
-          <ConnectionSettings
-            connection={activeWorkspace.connection}
-            connections={data.workspaces.map((workspace) => workspace.connection)}
-            busy={busy}
-            onCancel={() => setModal({ kind: "none" })}
-            onTest={async (connection, secrets) => {
-              setBusy(true);
-              try {
-                const nextData = await saveConnection({ workspaceId: activeWorkspace.id, connection, secrets });
-                setData(nextData);
-                const message = await testConnection(activeWorkspace.id);
-                appendLog(activeWorkspace.id, { level: "info", message, status: "connected" });
-                return message;
-              } catch (reason) {
-                void logSystemEvent({
-                  level: "error",
-                  target: "frontend",
-                  message: "Connection test failed in UI flow.",
-                  details: String(reason)
-                });
-                appendLog(activeWorkspace.id, { level: "error", message: String(reason), status: "failed" });
-                throw reason;
-              } finally {
-                setBusy(false);
-              }
-            }}
-            onSave={async (connection, secrets) => {
-              setData(await saveConnection({ workspaceId: activeWorkspace.id, connection, secrets }));
-              setModal({ kind: "none" });
-            }}
-          />
+        <Modal title={activeWorkspace.kind === "local" ? "Runner Settings" : "Connection Settings"} onClose={() => setModal({ kind: "none" })} width="wide">
+          {activeWorkspace.kind === "local" ? (
+            <LocalRunnerSettings
+              runner={activeWorkspace.localRunner}
+              onCancel={() => setModal({ kind: "none" })}
+              onSave={(localRunner) => {
+                updateActiveWorkspace((workspace) => ({ ...workspace, localRunner }));
+                setModal({ kind: "none" });
+              }}
+            />
+          ) : (
+            <ConnectionSettings
+              connection={activeWorkspace.connection}
+              connections={data.workspaces.filter((workspace) => workspace.kind === "ssh").map((workspace) => workspace.connection)}
+              busy={busy}
+              onCancel={() => setModal({ kind: "none" })}
+              onTest={async (connection, secrets) => {
+                setBusy(true);
+                try {
+                  const nextData = await saveConnection({ workspaceId: activeWorkspace.id, connection, secrets });
+                  setData(nextData);
+                  const message = await testConnection(activeWorkspace.id);
+                  appendLog(activeWorkspace.id, { level: "info", message, status: "connected" });
+                  return message;
+                } catch (reason) {
+                  void logSystemEvent({
+                    level: "error",
+                    target: "frontend",
+                    message: "Connection test failed in UI flow.",
+                    details: String(reason)
+                  });
+                  appendLog(activeWorkspace.id, { level: "error", message: String(reason), status: "failed" });
+                  throw reason;
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              onSave={async (connection, secrets) => {
+                setData(await saveConnection({ workspaceId: activeWorkspace.id, connection, secrets }));
+                setModal({ kind: "none" });
+              }}
+            />
+          )}
         </Modal>
       )}
 

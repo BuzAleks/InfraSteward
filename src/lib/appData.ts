@@ -1,9 +1,10 @@
 import { createId, nowIso } from "./ids";
-import type { AppData, GlobalScript, SshConnectionConfig, WorkspaceTab } from "./types";
+import type { AppData, GlobalScript, LocalRunnerConfig, SshConnectionConfig, WorkspaceTab } from "./types";
 
 export const CURRENT_SCHEMA_VERSION = 2;
 export const MAX_LOGS_PER_WORKSPACE = 500;
 export const DEFAULT_SCRIPT_TAG = "default";
+export const LOCAL_WORKSPACE_ID = "workspace_local";
 
 export function createDefaultConnection(): SshConnectionConfig {
   return {
@@ -13,16 +14,44 @@ export function createDefaultConnection(): SshConnectionConfig {
     port: 22,
     username: "",
     authType: "privateKey",
+    workingDirectory: "",
     connectionTimeoutSeconds: 15,
     executionTimeoutSeconds: 300
   };
+}
+
+export function createDefaultLocalRunner(): LocalRunnerConfig {
+  const userAgent = typeof globalThis.navigator === "undefined" ? "" : globalThis.navigator.userAgent.toLowerCase();
+  const platform = typeof globalThis.navigator === "undefined" ? "" : globalThis.navigator.platform.toLowerCase();
+  if (platform.includes("win") || userAgent.includes("windows")) {
+    return { kind: "gitBash", executionTimeoutSeconds: 300 };
+  }
+  if (platform.includes("mac") || userAgent.includes("mac os")) {
+    return { kind: "zsh", executionTimeoutSeconds: 300 };
+  }
+  return { kind: "bash", executionTimeoutSeconds: 300 };
 }
 
 export function createWorkspace(title = "New Workspace"): WorkspaceTab {
   return {
     id: createId("workspace"),
     title,
+    kind: "ssh",
     connection: createDefaultConnection(),
+    localRunner: createDefaultLocalRunner(),
+    parameterSettings: {},
+    attachedScripts: [],
+    logs: []
+  };
+}
+
+export function createLocalWorkspace(): WorkspaceTab {
+  return {
+    id: LOCAL_WORKSPACE_ID,
+    title: "LOCAL",
+    kind: "local",
+    connection: { ...createDefaultConnection(), id: "conn_local", name: "LOCAL" },
+    localRunner: createDefaultLocalRunner(),
     parameterSettings: {},
     attachedScripts: [],
     logs: []
@@ -44,7 +73,7 @@ export function createGlobalScript(fields?: Partial<GlobalScript>): GlobalScript
 }
 
 export function createDefaultAppData(): AppData {
-  const workspace = createWorkspace("New Workspace");
+  const workspace = createLocalWorkspace();
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     activeTabId: workspace.id,
@@ -71,16 +100,25 @@ export function normalizeAppData(input: unknown): AppData {
         content: script.content ?? ""
       }))
       .filter((script) => script.fileName),
-    workspaces: workspaces.filter(isWorkspace).map((workspace) => ({
-      ...workspace,
-      parameterSettings: isRecord(workspace.parameterSettings) ? normalizeParameterSettings(workspace.parameterSettings) : {},
-      attachedScripts: workspace.attachedScripts.map((attached) => ({
-        ...attached,
-        tag: normalizeScriptTag(attached.tag),
-        description: typeof attached.description === "string" ? attached.description : ""
-      })),
-      logs: workspace.logs.slice(-MAX_LOGS_PER_WORKSPACE)
-    }))
+    workspaces: ensureLocalWorkspace(
+      workspaces.filter(isWorkspace).map((workspace) => ({
+        ...workspace,
+        kind: workspace.kind === "local" ? "local" : "ssh",
+        title: workspace.kind === "local" ? "LOCAL" : workspace.title,
+        connection:
+          workspace.kind === "local"
+            ? { ...createDefaultConnection(), id: "conn_local", name: "LOCAL" }
+            : workspace.connection,
+        localRunner: normalizeLocalRunner(workspace.localRunner),
+        parameterSettings: isRecord(workspace.parameterSettings) ? normalizeParameterSettings(workspace.parameterSettings) : {},
+        attachedScripts: workspace.attachedScripts.map((attached) => ({
+          ...attached,
+          tag: normalizeScriptTag(attached.tag),
+          description: typeof attached.description === "string" ? attached.description : ""
+        })),
+        logs: workspace.logs.slice(-MAX_LOGS_PER_WORKSPACE)
+      }))
+    )
   };
 
   if (normalized.workspaces.length === 0) {
@@ -112,6 +150,35 @@ function scriptFileName(scriptName: string) {
   return `${scriptName.trim() || "New Script"}.sh`;
 }
 
+function ensureLocalWorkspace(workspaces: WorkspaceTab[]) {
+  const local = workspaces.find((workspace) => workspace.kind === "local" || workspace.id === LOCAL_WORKSPACE_ID);
+  const normalizedLocal = {
+    ...(local ?? createLocalWorkspace()),
+    id: LOCAL_WORKSPACE_ID,
+    title: "LOCAL",
+    kind: "local" as const,
+    connection: { ...createDefaultConnection(), id: "conn_local", name: "LOCAL" }
+  };
+  return [normalizedLocal, ...workspaces.filter((workspace) => workspace.id !== normalizedLocal.id && workspace.kind !== "local")];
+}
+
+function normalizeLocalRunner(value: unknown): LocalRunnerConfig {
+  if (!isRecord(value)) {
+    return createDefaultLocalRunner();
+  }
+  const allowedKinds: LocalRunnerConfig["kind"][] = ["bash", "sh", "zsh", "gitBash", "wsl", "custom"];
+  const kind = typeof value.kind === "string" && allowedKinds.includes(value.kind as LocalRunnerConfig["kind"])
+    ? (value.kind as LocalRunnerConfig["kind"])
+    : createDefaultLocalRunner().kind;
+  return {
+    kind,
+    command: typeof value.command === "string" ? value.command : undefined,
+    args: Array.isArray(value.args) ? value.args.filter((arg): arg is string => typeof arg === "string") : undefined,
+    workingDirectory: typeof value.workingDirectory === "string" ? value.workingDirectory : undefined,
+    executionTimeoutSeconds: typeof value.executionTimeoutSeconds === "number" ? value.executionTimeoutSeconds : 300
+  };
+}
+
 function isGlobalScript(value: unknown): value is GlobalScript {
   return (
     isRecord(value) &&
@@ -130,6 +197,7 @@ function isWorkspace(value: unknown): value is WorkspaceTab {
     isRecord(value) &&
     typeof value.id === "string" &&
     typeof value.title === "string" &&
+    (value.kind === undefined || value.kind === "local" || value.kind === "ssh") &&
     isRecord(value.connection) &&
     Array.isArray(value.attachedScripts) &&
     Array.isArray(value.logs)

@@ -22,6 +22,7 @@ describe("createMcpRegistry", () => {
         {
           id: "workspace_1",
           title: "Prod",
+          kind: "ssh",
           connection: {
             id: "conn_1",
             name: "Prod",
@@ -30,6 +31,7 @@ describe("createMcpRegistry", () => {
             username: "deploy",
             authType: "privateKey"
           },
+          localRunner: { kind: "bash", executionTimeoutSeconds: 300 },
           parameterSettings: {},
           attachedScripts: [
             {

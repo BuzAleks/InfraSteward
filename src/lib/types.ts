@@ -1,4 +1,6 @@
 export type AuthType = "password" | "privateKey";
+export type WorkspaceKind = "local" | "ssh";
+export type LocalRunnerKind = "bash" | "sh" | "zsh" | "gitBash" | "wsl" | "custom";
 
 export type ExecutionStatus =
   | "starting"
@@ -49,7 +51,16 @@ export type SshConnectionConfig = {
   privateKeyPath?: string;
   privateKeyContentRef?: string;
   passphraseRef?: string;
+  workingDirectory?: string;
   connectionTimeoutSeconds?: number;
+  executionTimeoutSeconds?: number;
+};
+
+export type LocalRunnerConfig = {
+  kind: LocalRunnerKind;
+  command?: string;
+  args?: string[];
+  workingDirectory?: string;
   executionTimeoutSeconds?: number;
 };
 
@@ -66,7 +77,9 @@ export type LogEntry = {
 export type WorkspaceTab = {
   id: string;
   title: string;
+  kind: WorkspaceKind;
   connection: SshConnectionConfig;
+  localRunner: LocalRunnerConfig;
   parameterSettings: Record<string, ScriptParameterSetting>;
   attachedScripts: AttachedScript[];
   logs: LogEntry[];

@@ -8,7 +8,8 @@ export function prepareRemoteCommand(
   scriptContent: string,
   parameterSettings: Record<string, ScriptParameterSetting>,
   shell: "bash" | "sh" = "bash",
-  localEnvironment: Record<string, string | undefined> = {}
+  localEnvironment: Record<string, string | undefined> = {},
+  workingDirectory = ""
 ): PreparedCommand {
   const environment: Record<string, string> = {};
 
@@ -31,7 +32,8 @@ export function prepareRemoteCommand(
     .join(" ");
 
   const commandShell = shell === "bash" ? "bash -s" : "sh -s";
-  const command = `${envPrefix ? `${envPrefix} ` : ""}${commandShell} <<'INFRAS_EOF'\n${scriptContent}\nINFRAS_EOF`;
+  const cdPrefix = workingDirectory.trim() ? `cd ${shellSingleQuote(workingDirectory.trim())} && ` : "";
+  const command = `${cdPrefix}${envPrefix ? `${envPrefix} ` : ""}${commandShell} <<'INFRAS_EOF'\n${scriptContent}\nINFRAS_EOF`;
 
   return { command, environment };
 }

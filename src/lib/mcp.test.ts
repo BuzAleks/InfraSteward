@@ -20,6 +20,7 @@ const appData: AppData = {
     {
       id: "workspace_1",
       title: "Prod",
+      kind: "ssh",
       connection: {
         id: "conn_1",
         name: "Prod",
@@ -28,6 +29,7 @@ const appData: AppData = {
         username: "deploy",
         authType: "privateKey"
       },
+      localRunner: { kind: "bash", executionTimeoutSeconds: 300 },
       parameterSettings: {},
       attachedScripts: [
           {

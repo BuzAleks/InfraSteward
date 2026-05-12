@@ -1,12 +1,13 @@
 # InfraSteward
 
-InfraSteward is a desktop DevOps assistant for managing SSH workspaces and running reusable remote scripts. It gives you a focused place to save server connection profiles, attach automation scripts to each workspace, configure script parameters, and inspect execution logs without turning everyday server work into a pile of one-off terminal commands.
+InfraSteward is a desktop DevOps assistant for managing local and SSH workspaces and running reusable shell scripts. It gives you a focused place to save server connection profiles, attach automation scripts to each workspace, configure script parameters, and inspect execution logs without turning everyday infrastructure work into a pile of one-off terminal commands.
 
 Built with **Tauri 2**, **React**, **TypeScript**, and **Rust**, InfraSteward keeps the interface lightweight while using a native backend for SSH execution and local storage.
 
 ## Highlights
 
-- **Tabbed SSH workspaces** for different servers, environments, or projects.
+- **Tabbed local and SSH workspaces** for different machines, servers, environments, or projects.
+- **Pinned LOCAL workspace** for running scripts on the machine where InfraSteward is open.
 - **Password and private-key authentication** through the Rust `ssh2` backend.
 - **Secret-aware credential storage** using the OS keychain when available, with an explicit local fallback option.
 - **Reusable global `.sh` scripts** stored in the working data directory and attachable to any workspace multiple times.
@@ -20,8 +21,8 @@ Built with **Tauri 2**, **React**, **TypeScript**, and **Rust**, InfraSteward ke
 
 InfraSteward is organized around a small set of practical views:
 
-- **Workspace tabs**: create, rename, switch, and close server workspaces.
-- **Connection Settings**: configure host, port, username, authentication type, timeouts, and credentials.
+- **Workspace tabs**: create, rename, switch, and close server workspaces; the pinned `LOCAL` tab cannot be removed.
+- **Connection Settings / Runner Settings**: configure SSH credentials for remote workspaces or the local shell runner for `LOCAL`.
 - **Script Manager**: create, edit, search, and delete reusable scripts.
 - **Attached Scripts**: choose which scripts belong to the active workspace.
 - **Logs**: review command output and execution history for the active workspace, or run a script in a separate log window.
@@ -69,7 +70,7 @@ npm.cmd run web:build
 
 ## Usage
 
-1. Open **Connection Settings** and enter the server host, port, username, and authentication method.
+1. Use the pinned **LOCAL** workspace to run scripts on this machine, or open **Connection Settings** on an SSH workspace and enter the server host, port, username, and authentication method.
 2. Enter a password or private key details, then click **Test Connection**.
 3. Open **Script Manager** and create reusable shell scripts.
 4. Attach scripts to the active workspace. The first copy uses tag `default`; additional copies ask for a unique tag.
@@ -95,7 +96,7 @@ On Windows, the backend stores secrets directly in Windows Credential Manager. O
 
 ## Script Parameters
 
-InfraSteward detects `${VAR}` and `${VAR:-default}` style variables in scripts. Bare `$VAR` references are ignored to avoid over-detecting internal shell variables. Workspace parameters are collected from attached scripts without duplicates and are removed when no attached script uses them. Manual values and selected local environment values are passed to the remote shell as environment variables instead of being substituted directly into script text.
+InfraSteward detects `${VAR}` and `${VAR:-default}` style variables in scripts. Bare `$VAR` references are ignored to avoid over-detecting internal shell variables. Workspace parameters are collected from attached scripts without duplicates and are removed when no attached script uses them. Manual values and selected local environment values are passed to the shell as environment variables instead of being substituted directly into script text.
 
 Example:
 
@@ -105,11 +106,17 @@ df -h "${TARGET_PATH:-/}"
 INFRAS_EOF
 ```
 
-If **Local ENV** is enabled for a parameter, InfraSteward reads the variable from the local app process environment, shows that value in the disabled Value field, and passes it to the remote shell. Empty manual values are still omitted, so the remote server can resolve them itself.
+If **Local ENV** is enabled for a parameter, InfraSteward reads the variable from the local app process environment, shows that value in the disabled Value field, and passes it to the shell. Empty manual values are still omitted, so the target shell can resolve them itself.
+
+For SSH workspaces, **Working directory** in Connection Settings is the directory on the remote server where scripts should start. InfraSteward applies it as `cd '<directory>' && bash -s`, so relative paths and commands such as `docker compose` behave as if the script began with `cd /your/project`.
+
+## Local Execution
+
+The pinned `LOCAL` workspace runs scripts on the machine where InfraSteward is open. Use **Runner Settings** to choose `bash`, `sh`, `zsh`, Git Bash, WSL bash, or a custom command. Linux defaults to `bash`, macOS defaults to `zsh`, and Windows defaults to Git Bash with auto-detection of common install paths. Output, cancellation, timeouts, parameters, queued runs, new log windows, and MCP all use the same workflow as SSH workspaces.
 
 ## MCP Integration
 
-The `mcp-server/` package can expose selected InfraSteward scripts as MCP tools. Turn on the local MCP bridge with the **MCP** button on the right side of the tab bar, then point your MCP client at `npm.cmd run mcp:dev` from this repository. The desktop app listens on `127.0.0.1:47321`; the stdio wrapper forwards MCP tool discovery and execution to that bridge. This is intentionally opt-in because MCP tool calls can execute remote commands over SSH.
+The `mcp-server/` package can expose selected InfraSteward scripts as MCP tools. Turn on the local MCP bridge with the **MCP** button on the right side of the tab bar, then point your MCP client at `npm.cmd run mcp:dev` from this repository. The desktop app listens on `127.0.0.1:47321`; the stdio wrapper forwards MCP tool discovery and execution to that bridge. This is intentionally opt-in because MCP tool calls can execute commands on SSH targets or on the local machine.
 
 Only enable MCP access for scripts you trust.
 
