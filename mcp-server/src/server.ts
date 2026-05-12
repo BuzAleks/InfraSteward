@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -84,7 +84,27 @@ async function loadAppData(): Promise<AppData> {
   const explicitPath = process.env.INFRASTEWARD_APP_DATA;
   const appDataPath = explicitPath ?? defaultAppDataPath();
   const content = await readFile(appDataPath, "utf8");
-  return normalizeAppData(JSON.parse(content));
+  const appData = normalizeAppData(JSON.parse(content));
+  return hydrateScriptContents(appData, join(dirname(appDataPath), "scripts"));
+}
+
+async function hydrateScriptContents(appData: AppData, scriptsDir: string): Promise<AppData> {
+  const globalScripts = await Promise.all(
+    appData.globalScripts.map(async (script) => {
+      if (script.content) {
+        return script;
+      }
+      try {
+        return {
+          ...script,
+          content: await readFile(join(scriptsDir, script.fileName), "utf8")
+        };
+      } catch {
+        return script;
+      }
+    })
+  );
+  return { ...appData, globalScripts };
 }
 
 function defaultAppDataPath(): string {

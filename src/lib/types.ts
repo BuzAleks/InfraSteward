@@ -16,6 +16,7 @@ export type GlobalScript = {
   id: string;
   name: string;
   description: string;
+  fileName: string;
   content: string;
   createdAt: string;
   updatedAt: string;
@@ -30,6 +31,7 @@ export type AttachedScript = {
   id: string;
   globalScriptId: string;
   tag: string;
+  description: string;
   parameterSettings: Record<string, ScriptParameterSetting>;
   useInMcp: boolean;
   selected?: boolean;

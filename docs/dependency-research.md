@@ -14,7 +14,7 @@ Selected libraries:
 - `lucide-react` for accessible toolbar/action icons.
 - Rust `ssh2` for SSH command execution.
 - Rust `windows-sys` for direct Windows Credential Manager integration.
-- Rust `keyring` for secure credential storage on non-Windows platforms and legacy migration fallback.
+- Rust `keyring` for secure credential storage on non-Windows platforms.
 - MCP TypeScript SDK for stdio server integration.
 - Vitest for fast unit tests around parsing, storage, command construction, and MCP registry behavior.
 

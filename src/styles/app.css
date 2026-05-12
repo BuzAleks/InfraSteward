@@ -436,8 +436,54 @@ textarea {
   justify-content: center;
 }
 
+.mcpBadge {
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid #8bc9a0;
+  border-radius: 5px;
+  background: #eaf8ef;
+  color: #115c2f;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+
 .listControls {
   margin-top: 12px;
+}
+
+.mcpSelectionToggle {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #c7d0db;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mcpSelectionToggle:hover {
+  border-color: #8291a4;
+  background: #f8fafc;
+}
+
+.mcpSelectionToggle input {
+  width: auto;
+}
+
+.mcpSelectionToggle.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.mcpSelectionToggle.disabled:hover {
+  border-color: #c7d0db;
+  background: #ffffff;
 }
 
 .primaryButton {
@@ -685,10 +731,41 @@ textarea {
 
 .formGrid label,
 .inlineEditor label,
-.scriptEditorScreen label {
+.scriptEditorScreen label,
+.scriptSettingsTop label,
+.parameterRow label {
   display: grid;
   gap: 5px;
   font-weight: 600;
+}
+
+.scriptSettingsForm {
+  height: min(620px, calc(100vh - 160px));
+  min-height: 360px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.scriptSettingsTop {
+  display: grid;
+  gap: 12px;
+}
+
+.scriptSettingsTop textarea {
+  min-height: 78px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.scriptSettingsVariables {
+  min-height: 0;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .editorToolbar {

@@ -30,12 +30,16 @@ use windows_sys::Win32::{
 #[cfg(windows)]
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_LOGS_PER_WORKSPACE: usize = 500;
 const MAX_SYSTEM_LOG_BYTES: u64 = 2 * 1024 * 1024;
 const SERVICE_NAME: &str = "InfraSteward";
 const DATA_DIR_ENV_VAR: &str = "INFRASTEWARD_DATA_DIR";
 const DATA_DIR_OVERRIDE_FILE: &str = "data-dir.txt";
+const SCRIPTS_DIR_NAME: &str = "scripts";
+const SCRIPT_FILE_EXTENSION: &str = "sh";
+const DESCRIPTION_START_MARKER: &str = "# [description]";
+const DESCRIPTION_END_MARKER: &str = "# [/description]";
 const MCP_BRIDGE_PORT: u16 = 47321;
 const MCP_TIMEOUT_PARAMETER: &str = "timeoutSeconds";
 const MCP_DEFAULT_TIMEOUT_SECONDS: u64 = 30;
@@ -81,6 +85,8 @@ pub struct GlobalScript {
     id: String,
     name: String,
     description: String,
+    file_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     content: String,
     created_at: String,
     updated_at: String,
@@ -103,6 +109,8 @@ pub struct AttachedScript {
     global_script_id: String,
     #[serde(default = "default_script_tag")]
     tag: String,
+    #[serde(default)]
+    description: String,
     parameter_settings: HashMap<String, ScriptParameterSetting>,
     use_in_mcp: bool,
     selected: Option<bool>,
@@ -228,6 +236,7 @@ pub struct ScriptExecutionEvent {
 pub struct RuntimeInfo {
     working_data_dir: String,
     system_log_path: String,
+    scripts_dir: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -310,11 +319,32 @@ impl Serialize for InfraError {
 }
 
 #[tauri::command]
-fn load_app_data(state: State<'_, SharedAppData>) -> Result<AppData, InfraError> {
-    Ok(state
+fn load_app_data(app: AppHandle, state: State<'_, SharedAppData>) -> Result<AppData, InfraError> {
+    let mut data = state
         .lock()
         .map_err(|err| InfraError::Storage(err.to_string()))?
-        .clone())
+        .clone();
+    match sync_scripts_from_files(&app, &mut data) {
+        Ok(changed) => {
+            if changed {
+                write_app_data(&app, &data)?;
+            }
+        }
+        Err(err) => {
+            write_system_log(
+                &app,
+                "error",
+                "storage",
+                "Could not synchronize scripts directory while loading app data.",
+                Some(err.to_string()),
+            );
+            hydrate_script_contents(&app, &mut data)?;
+        }
+    }
+    *state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))? = data.clone();
+    Ok(data)
 }
 
 #[tauri::command]
@@ -323,7 +353,8 @@ fn save_app_data(
     state: State<'_, SharedAppData>,
     app_data: AppData,
 ) -> Result<(), InfraError> {
-    let normalized = normalize_app_data(app_data);
+    let mut normalized = normalize_app_data(app_data);
+    sync_scripts_from_files(&app, &mut normalized)?;
     if let Err(err) = write_app_data(&app, &normalized) {
         write_system_log(
             &app,
@@ -338,6 +369,114 @@ fn save_app_data(
         .lock()
         .map_err(|err| InfraError::Storage(err.to_string()))? = normalized;
     Ok(())
+}
+
+#[tauri::command]
+fn save_global_script(
+    app: AppHandle,
+    state: State<'_, SharedAppData>,
+    script: GlobalScript,
+) -> Result<AppData, InfraError> {
+    let mut data = state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))?
+        .clone();
+    let mut next_script = script;
+    next_script.name = next_script.name.trim().into();
+    validate_script_file_name(&next_script.name)?;
+    validate_unique_script_name(&data, &next_script.id, &next_script.name)?;
+    next_script.file_name = script_file_name(&next_script.name)?;
+
+    let existing = data
+        .global_scripts
+        .iter()
+        .find(|candidate| candidate.id == next_script.id)
+        .cloned();
+    if let Some(existing_script) = existing.as_ref() {
+        next_script.created_at = existing_script.created_at.clone();
+    }
+
+    write_script_file(&app, &next_script)?;
+    if let Some(existing_script) = existing.as_ref() {
+        let existing_file_name = normalized_script_file_name(existing_script)?;
+        if existing_file_name != next_script.file_name {
+            delete_script_file(&app, &existing_file_name)?;
+        }
+    }
+
+    if data
+        .global_scripts
+        .iter()
+        .any(|candidate| candidate.id == next_script.id)
+    {
+        data.global_scripts = data
+            .global_scripts
+            .into_iter()
+            .map(|candidate| {
+                if candidate.id == next_script.id {
+                    next_script.clone()
+                } else {
+                    candidate
+                }
+            })
+            .collect();
+    } else {
+        data.global_scripts.push(next_script);
+    }
+
+    let normalized = normalize_app_data(data);
+    write_app_data(&app, &normalized)?;
+    *state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))? = normalized.clone();
+    Ok(normalized)
+}
+
+#[tauri::command]
+fn delete_global_script(
+    app: AppHandle,
+    state: State<'_, SharedAppData>,
+    script_id: String,
+) -> Result<AppData, InfraError> {
+    let mut data = state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))?
+        .clone();
+    let deleted = data
+        .global_scripts
+        .iter()
+        .find(|candidate| candidate.id == script_id)
+        .cloned();
+    data.global_scripts
+        .retain(|candidate| candidate.id != script_id);
+    if let Some(script) = deleted {
+        delete_script_file(&app, &normalized_script_file_name(&script)?)?;
+    }
+
+    let normalized = normalize_app_data(data);
+    write_app_data(&app, &normalized)?;
+    *state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))? = normalized.clone();
+    Ok(normalized)
+}
+
+#[tauri::command]
+fn read_global_script_content(
+    app: AppHandle,
+    state: State<'_, SharedAppData>,
+    script_id: String,
+) -> Result<String, InfraError> {
+    let data = state
+        .lock()
+        .map_err(|err| InfraError::Storage(err.to_string()))?
+        .clone();
+    let script = data
+        .global_scripts
+        .iter()
+        .find(|script| script.id == script_id)
+        .ok_or(InfraError::MissingScript)?;
+    read_script_file(&app, script)
 }
 
 #[tauri::command]
@@ -514,6 +653,7 @@ async fn run_script(
         .iter()
         .find(|script| script.id == attached.global_script_id)
         .ok_or(InfraError::MissingScript)?;
+    let script_content = read_script_file(&app, script)?;
 
     let mut settings = attached.parameter_settings.clone();
     if let Some(overrides) = request.parameter_overrides {
@@ -528,7 +668,7 @@ async fn run_script(
         }
     }
 
-    let command = prepare_remote_command(&script.content, &settings);
+    let command = prepare_remote_command(&script_content, &settings);
     let connection = workspace.connection;
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let events = Arc::new(Mutex::new(VecDeque::new()));
@@ -712,6 +852,7 @@ fn get_runtime_info(app: AppHandle) -> Result<RuntimeInfo, InfraError> {
     Ok(RuntimeInfo {
         working_data_dir: working_data_dir(&app)?.display().to_string(),
         system_log_path: system_log_path(&app)?.display().to_string(),
+        scripts_dir: scripts_dir(&app)?.display().to_string(),
     })
 }
 
@@ -1070,6 +1211,67 @@ fn normalize_connection_name(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
+fn validate_unique_script_name(
+    data: &AppData,
+    script_id: &str,
+    script_name: &str,
+) -> Result<(), InfraError> {
+    let normalized = normalize_script_name(script_name);
+    if normalized.is_empty() {
+        return Err(InfraError::Validation("Script name is required.".into()));
+    }
+    let duplicate = data
+        .global_scripts
+        .iter()
+        .any(|script| script.id != script_id && normalize_script_name(&script.name) == normalized);
+    if duplicate {
+        return Err(InfraError::Validation("Script name must be unique.".into()));
+    }
+    Ok(())
+}
+
+fn normalize_script_name(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn validate_script_file_name(script_name: &str) -> Result<(), InfraError> {
+    let trimmed = script_name.trim();
+    if trimmed.is_empty() {
+        return Err(InfraError::Validation("Script name is required.".into()));
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err(InfraError::Validation(
+            "Script name cannot be . or ...".into(),
+        ));
+    }
+    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
+        return Err(InfraError::Validation(
+            "Script name cannot end with a dot or space.".into(),
+        ));
+    }
+    if trimmed.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
+    }) {
+        return Err(InfraError::Validation(
+            "Script name contains characters that cannot be used in a file name.".into(),
+        ));
+    }
+    let reserved = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    if reserved.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        return Err(InfraError::Validation(
+            "Script name is reserved by Windows and cannot be used as a file name.".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn find_workspace<'a>(
     data: &'a AppData,
     workspace_id: &str,
@@ -1083,6 +1285,13 @@ fn find_workspace<'a>(
 fn normalize_app_data(mut data: AppData) -> AppData {
     if data.schema_version != SCHEMA_VERSION {
         return default_app_data();
+    }
+    for script in &mut data.global_scripts {
+        script.name = script.name.trim().into();
+        if script.file_name.trim().is_empty() {
+            script.file_name =
+                script_file_name(&script.name).unwrap_or_else(|_| format!("{}.sh", script.id));
+        }
     }
     if data.workspaces.is_empty() {
         let workspace = default_workspace();
@@ -1103,6 +1312,7 @@ fn normalize_app_data(mut data: AppData) -> AppData {
             } else {
                 attached.tag = attached.tag.trim().into();
             }
+            attached.description = attached.description.trim().into();
         }
         if workspace.logs.len() > MAX_LOGS_PER_WORKSPACE {
             workspace.logs = workspace
@@ -1122,14 +1332,7 @@ fn default_app_data() -> AppData {
     AppData {
         schema_version: SCHEMA_VERSION,
         active_tab_id: workspace.id.clone(),
-        global_scripts: vec![GlobalScript {
-            id: format!("script_{}", Uuid::new_v4()),
-            name: "Check Disk Usage".into(),
-            description: "Show disk usage for the configured path.".into(),
-            content: "df -h \"${TARGET_PATH:-/}\"".into(),
-            created_at: "2026-01-01T00:00:00.000Z".into(),
-            updated_at: "2026-01-01T00:00:00.000Z".into(),
-        }],
+        global_scripts: Vec::new(),
         workspaces: vec![workspace],
     }
 }
@@ -1163,12 +1366,309 @@ fn app_data_path(app: &AppHandle) -> Result<PathBuf, InfraError> {
     Ok(directory.join("app-data.json"))
 }
 
+fn scripts_dir(app: &AppHandle) -> Result<PathBuf, InfraError> {
+    let directory = working_data_dir(app)?.join(SCRIPTS_DIR_NAME);
+    fs::create_dir_all(&directory).map_err(|err| InfraError::Storage(err.to_string()))?;
+    Ok(directory)
+}
+
+fn script_file_name(script_name: &str) -> Result<String, InfraError> {
+    validate_script_file_name(script_name)?;
+    Ok(format!("{}.{}", script_name.trim(), SCRIPT_FILE_EXTENSION))
+}
+
+fn validate_script_file_reference(file_name: &str) -> Result<(), InfraError> {
+    let path = Path::new(file_name);
+    if path.components().count() != 1 {
+        return Err(InfraError::Validation(
+            "Script file reference must be a file name, not a path.".into(),
+        ));
+    }
+    if script_name_from_file_path(path).is_none() {
+        return Err(InfraError::Validation(
+            "Script file reference must point to a .sh file.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_script_file_name(script: &GlobalScript) -> Result<String, InfraError> {
+    if script.file_name.trim().is_empty() {
+        return script_file_name(&script.name);
+    }
+    validate_script_file_reference(&script.file_name)?;
+    Ok(script.file_name.trim().into())
+}
+
+fn script_file_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, InfraError> {
+    validate_script_file_reference(file_name)?;
+    Ok(scripts_dir(app)?.join(file_name.trim()))
+}
+
+fn write_script_file(app: &AppHandle, script: &GlobalScript) -> Result<(), InfraError> {
+    let path = script_file_path(app, &normalized_script_file_name(script)?)?;
+    fs::write(path, compose_script_file(script)).map_err(|err| InfraError::Storage(err.to_string()))
+}
+
+fn read_script_file(app: &AppHandle, script: &GlobalScript) -> Result<String, InfraError> {
+    let path = script_file_path(app, &normalized_script_file_name(script)?)?;
+    let raw = fs::read_to_string(path).map_err(|err| InfraError::Storage(err.to_string()))?;
+    Ok(parse_script_file(&raw).content)
+}
+
+fn hydrate_script_contents(app: &AppHandle, data: &mut AppData) -> Result<(), InfraError> {
+    for script in &mut data.global_scripts {
+        let path = script_file_path(app, &normalized_script_file_name(script)?)?;
+        let raw = fs::read_to_string(path).map_err(|err| InfraError::Storage(err.to_string()))?;
+        let parsed = parse_script_file(&raw);
+        script.description = parsed.description;
+        script.content = parsed.content;
+    }
+    Ok(())
+}
+
+struct ParsedScriptFile {
+    description: String,
+    content: String,
+}
+
+fn parse_script_file(raw: &str) -> ParsedScriptFile {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let lines = normalized.split('\n').collect::<Vec<_>>();
+    let start_index = lines
+        .iter()
+        .position(|line| line.trim() == DESCRIPTION_START_MARKER);
+    let Some(start_index) = start_index else {
+        return ParsedScriptFile {
+            description: String::new(),
+            content: raw.into(),
+        };
+    };
+    let end_index = lines
+        .iter()
+        .enumerate()
+        .skip(start_index + 1)
+        .find_map(|(index, line)| (line.trim() == DESCRIPTION_END_MARKER).then_some(index));
+    let Some(end_index) = end_index else {
+        return ParsedScriptFile {
+            description: String::new(),
+            content: raw.into(),
+        };
+    };
+
+    let description = lines[start_index + 1..end_index]
+        .iter()
+        .map(|line| clean_description_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_matches('\n')
+        .to_string();
+    let mut content_lines =
+        Vec::with_capacity(lines.len().saturating_sub(end_index - start_index + 1));
+    content_lines.extend_from_slice(&lines[..start_index]);
+    content_lines.extend_from_slice(&lines[end_index + 1..]);
+    let content = trim_extra_blank_lines(content_lines.join("\n"));
+    ParsedScriptFile {
+        description,
+        content,
+    }
+}
+
+fn clean_description_line(line: &str) -> String {
+    let trimmed_start = line.trim_start();
+    let Some(rest) = trimmed_start.strip_prefix('#') else {
+        return line.to_string();
+    };
+    rest.strip_prefix(' ').unwrap_or(rest).to_string()
+}
+
+fn trim_extra_blank_lines(value: String) -> String {
+    value.trim_matches('\n').to_string()
+}
+
+fn compose_script_file(script: &GlobalScript) -> String {
+    let content = trim_extra_blank_lines(script.content.replace("\r\n", "\n").replace('\r', "\n"));
+    let description =
+        trim_extra_blank_lines(script.description.replace("\r\n", "\n").replace('\r', "\n"));
+    let (shebang, body) = split_shebang(&content);
+    let mut sections = Vec::new();
+    if let Some(shebang) = shebang {
+        sections.push(shebang.to_string());
+    }
+    if !description.is_empty() {
+        let mut block = String::from(DESCRIPTION_START_MARKER);
+        for line in description.split('\n') {
+            block.push('\n');
+            block.push_str("#");
+            if !line.is_empty() {
+                block.push(' ');
+                block.push_str(line);
+            }
+        }
+        block.push('\n');
+        block.push_str(DESCRIPTION_END_MARKER);
+        sections.push(block);
+    }
+    if !body.trim_matches('\n').is_empty() {
+        sections.push(trim_extra_blank_lines(body.to_string()));
+    }
+    format!("{}\n", sections.join("\n\n"))
+}
+
+fn split_shebang(content: &str) -> (Option<&str>, &str) {
+    if !content.starts_with("#!") {
+        return (None, content);
+    }
+    match content.find('\n') {
+        Some(index) => (Some(&content[..index]), &content[index + 1..]),
+        None => (Some(content), ""),
+    }
+}
+
+fn delete_script_file(app: &AppHandle, file_name: &str) -> Result<(), InfraError> {
+    let path = script_file_path(app, file_name)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(InfraError::Storage(err.to_string())),
+    }
+}
+
+fn script_name_from_file_path(path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?;
+    if !extension.eq_ignore_ascii_case(SCRIPT_FILE_EXTENSION) {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?.trim();
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem.into())
+    }
+}
+
+fn sync_scripts_from_files(app: &AppHandle, data: &mut AppData) -> Result<bool, InfraError> {
+    let directory = working_data_dir(app)?.join(SCRIPTS_DIR_NAME);
+    fs::create_dir_all(&directory).map_err(|err| InfraError::Storage(err.to_string()))?;
+
+    let mut file_scripts = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|err| InfraError::Storage(err.to_string()))? {
+        let entry = entry.map_err(|err| InfraError::Storage(err.to_string()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = script_name_from_file_path(&path) else {
+            continue;
+        };
+        if let Err(err) = validate_script_file_name(&name) {
+            write_system_log(
+                app,
+                "warn",
+                "storage",
+                "Ignoring script file with invalid name.",
+                Some(format!("path={}: {err}", path.display())),
+            );
+            continue;
+        }
+        let raw = fs::read_to_string(&path).map_err(|err| InfraError::Storage(err.to_string()))?;
+        file_scripts.push((name, parse_script_file(&raw)));
+    }
+    file_scripts.sort_by_key(|(name, _)| normalize_script_name(name));
+
+    let timestamp = now_iso();
+    let mut existing_by_file_name = data
+        .global_scripts
+        .iter()
+        .cloned()
+        .filter_map(|script| {
+            normalized_script_file_name(&script)
+                .ok()
+                .map(|file_name| (file_name.to_ascii_lowercase(), script))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut seen_names = HashMap::<String, ()>::new();
+    let mut next_scripts = Vec::new();
+
+    for (name, parsed) in file_scripts {
+        let key = normalize_script_name(&name);
+        if seen_names.insert(key.clone(), ()).is_some() {
+            write_system_log(
+                app,
+                "warn",
+                "storage",
+                "Ignoring duplicate script file name.",
+                Some(name),
+            );
+            continue;
+        }
+        let file_name = script_file_name(&name)?;
+        if let Some(mut script) = existing_by_file_name.remove(&file_name.to_ascii_lowercase()) {
+            script.name = name;
+            script.file_name = file_name;
+            if script.content != parsed.content || script.description != parsed.description {
+                script.description = parsed.description;
+                script.content = parsed.content;
+                script.updated_at = timestamp.clone();
+            }
+            next_scripts.push(script);
+        } else {
+            next_scripts.push(GlobalScript {
+                id: format!("script_{}", Uuid::new_v4()),
+                name,
+                description: parsed.description,
+                file_name,
+                content: parsed.content,
+                created_at: timestamp.clone(),
+                updated_at: timestamp.clone(),
+            });
+        }
+    }
+
+    let changed = !scripts_equivalent_for_sync(&data.global_scripts, &next_scripts);
+    data.global_scripts = next_scripts;
+    if changed {
+        write_system_log(
+            app,
+            "info",
+            "storage",
+            "Synchronized scripts directory.",
+            Some(format!("scriptCount={}", data.global_scripts.len())),
+        );
+    }
+    Ok(changed)
+}
+
+fn scripts_equivalent_for_sync(left: &[GlobalScript], right: &[GlobalScript]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.id == right.id
+                && left.name == right.name
+                && left.description == right.description
+                && left.file_name == right.file_name
+                && left.content == right.content
+                && left.created_at == right.created_at
+                && left.updated_at == right.updated_at
+        })
+}
+
 fn read_app_data(app: &AppHandle) -> AppData {
     let Ok(path) = app_data_path(app) else {
         return default_app_data();
     };
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
+    let mut data = match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map(normalize_app_data)
+            .unwrap_or_else(|err| {
+                write_system_log(
+                    app,
+                    "error",
+                    "storage",
+                    "Could not parse app data. Falling back to defaults.",
+                    Some(err.to_string()),
+                );
+                default_app_data()
+            }),
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
                 write_system_log(
@@ -1179,28 +1679,43 @@ fn read_app_data(app: &AppHandle) -> AppData {
                     Some(err.to_string()),
                 );
             }
-            return default_app_data();
+            default_app_data()
         }
     };
-    serde_json::from_str(&content)
-        .map(normalize_app_data)
-        .unwrap_or_else(|err| {
-            write_system_log(
-                app,
-                "error",
-                "storage",
-                "Could not parse app data. Falling back to defaults.",
-                Some(err.to_string()),
-            );
-            default_app_data()
-        })
+
+    match sync_scripts_from_files(app, &mut data) {
+        Ok(changed) => {
+            if changed {
+                let _ = write_app_data(app, &data);
+            }
+        }
+        Err(err) => write_system_log(
+            app,
+            "error",
+            "storage",
+            "Could not synchronize scripts directory.",
+            Some(err.to_string()),
+        ),
+    }
+    data
+}
+
+fn now_iso() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| format!("unix-ms:{}", duration.as_millis()))
+        .unwrap_or_else(|_| "unix-ms:0".into())
 }
 
 fn write_app_data(app: &AppHandle, data: &AppData) -> Result<(), InfraError> {
     let path = app_data_path(app)?;
     let temp_path = path.with_extension("json.tmp");
-    let content =
-        serde_json::to_string_pretty(data).map_err(|err| InfraError::Storage(err.to_string()))?;
+    let mut persisted = data.clone();
+    for script in &mut persisted.global_scripts {
+        script.content.clear();
+    }
+    let content = serde_json::to_string_pretty(&persisted)
+        .map_err(|err| InfraError::Storage(err.to_string()))?;
     fs::write(&temp_path, content).map_err(|err| InfraError::Storage(err.to_string()))?;
     fs::rename(temp_path, path).map_err(|err| InfraError::Storage(err.to_string()))?;
     Ok(())
@@ -1556,10 +2071,11 @@ fn http_response(status: u16, content_type: &str, body: &str) -> String {
 
 fn read_shared_app_data(app: &AppHandle) -> Result<AppData, InfraError> {
     let state = app.state::<SharedAppData>();
-    let data = state
+    let mut data = state
         .lock()
         .map_err(|err| InfraError::Storage(err.to_string()))?
         .clone();
+    hydrate_script_contents(app, &mut data)?;
     Ok(data)
 }
 
@@ -1584,6 +2100,7 @@ fn execute_mcp_bridge_script(
         .iter()
         .find(|script| script.id == attached.global_script_id)
         .ok_or(InfraError::MissingScript)?;
+    let script_content = read_script_file(app, script)?;
     let mut args = request.args.unwrap_or_default();
     let timeout_seconds = parse_mcp_timeout_seconds(args.remove(MCP_TIMEOUT_PARAMETER))?;
     let mut settings = attached.parameter_settings.clone();
@@ -1596,7 +2113,7 @@ fn execute_mcp_bridge_script(
             },
         );
     }
-    let command = prepare_remote_command(&script.content, &settings);
+    let command = prepare_remote_command(&script_content, &settings);
     let mut connection = workspace.connection.clone();
     connection.execution_timeout_seconds = Some(timeout_seconds);
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -1699,11 +2216,13 @@ fn create_mcp_tool_definitions(data: &AppData) -> Vec<McpToolDefinition> {
                 to_tool_slug(&format!("{connection_name}_{}_{}", script.name, script_tag)),
                 McpToolDefinition {
                     name: String::new(),
-                    description: if script.description.is_empty() {
-                        format!("Run {} ({script_tag}) on {connection_name}.", script.name)
-                    } else {
-                        script.description.clone()
-                    },
+                    description: mcp_tool_description(
+                        &script.description,
+                        &attached.description,
+                        &script.name,
+                        script_tag,
+                        connection_name,
+                    ),
                     workspace_id: workspace.id.clone(),
                     workspace_title: connection_name.into(),
                     attached_script_id: attached.id.clone(),
@@ -1718,6 +2237,27 @@ fn create_mcp_tool_definitions(data: &AppData) -> Vec<McpToolDefinition> {
         }
     }
     dedupe_mcp_tool_names(drafts)
+}
+
+fn mcp_tool_description(
+    script_description: &str,
+    attachment_description: &str,
+    script_name: &str,
+    script_tag: &str,
+    connection_name: &str,
+) -> String {
+    let specific_description = attachment_description.trim();
+    let base_description = script_description.trim();
+    if !specific_description.is_empty() && !base_description.is_empty() {
+        return format!("{specific_description}\n\nBase script: {base_description}");
+    }
+    if !specific_description.is_empty() {
+        return specific_description.into();
+    }
+    if !base_description.is_empty() {
+        return base_description.into();
+    }
+    format!("Run {script_name} ({script_tag}) on {connection_name}.")
 }
 
 fn dedupe_mcp_tool_names(drafts: Vec<(String, McpToolDefinition)>) -> Vec<McpToolDefinition> {
@@ -2083,6 +2623,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_app_data,
             save_app_data,
+            save_global_script,
+            delete_global_script,
+            read_global_script_content,
             save_connection,
             test_connection,
             run_script,

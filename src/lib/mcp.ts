@@ -45,7 +45,7 @@ export function createMcpToolDefinitions(appData: AppData): McpToolDefinition[] 
       const scriptTag = attached.tag.trim() || "default";
       tools.push({
         baseName: toToolSlug(`${connectionName}_${script.name}_${scriptTag}`) || `script_${script.id}_${scriptTag}`,
-        description: script.description || `Run ${script.name} (${scriptTag}) on ${connectionName}.`,
+        description: createToolDescription(script.description, attached.description, script.name, scriptTag, connectionName),
         workspaceId: workspace.id,
         workspaceTitle: connectionName,
         attachedScriptId: attached.id,
@@ -63,6 +63,27 @@ export function createMcpToolDefinitions(appData: AppData): McpToolDefinition[] 
 }
 
 type MpcToolDraft = Omit<McpToolDefinition, "name"> & { baseName: string };
+
+function createToolDescription(
+  scriptDescription: string,
+  attachmentDescription: string | undefined,
+  scriptName: string,
+  scriptTag: string,
+  connectionName: string
+) {
+  const specificDescription = attachmentDescription?.trim();
+  const baseDescription = scriptDescription.trim();
+  if (specificDescription && baseDescription) {
+    return `${specificDescription}\n\nBase script: ${baseDescription}`;
+  }
+  if (specificDescription) {
+    return specificDescription;
+  }
+  if (baseDescription) {
+    return baseDescription;
+  }
+  return `Run ${scriptName} (${scriptTag}) on ${connectionName}.`;
+}
 
 function dedupeToolNames(drafts: MpcToolDraft[]): McpToolDefinition[] {
   const used = new Map<string, number>();

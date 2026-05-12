@@ -3,13 +3,14 @@ import { createMcpToolDefinitions, toToolSlug } from "./mcp";
 import type { AppData } from "./types";
 
 const appData: AppData = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   activeTabId: "workspace_1",
   globalScripts: [
     {
       id: "script_1",
       name: "Deploy Backend",
       description: "Deploy backend service",
+      fileName: "Deploy Backend.sh",
       content: 'cd "${APP_DIR}" && docker compose up -d "${SERVICE_NAME}"',
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z"
@@ -32,6 +33,7 @@ const appData: AppData = {
             id: "attached_1",
             globalScriptId: "script_1",
             tag: "default",
+            description: "Deploy the default backend instance",
             parameterSettings: {},
             useInMcp: true
           },
@@ -39,6 +41,7 @@ const appData: AppData = {
             id: "attached_2",
             globalScriptId: "script_1",
             tag: "blue",
+            description: "",
             parameterSettings: {},
             useInMcp: true
           }
@@ -58,6 +61,8 @@ describe("createMcpToolDefinitions", () => {
   it("generates schemas from script variables", () => {
     const [tool] = createMcpToolDefinitions(appData);
     expect(tool.name).toBe("prod_deploy_backend_default");
+    expect(tool.description).toContain("Deploy the default backend instance");
+    expect(tool.description).toContain("Base script: Deploy backend service");
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["APP_DIR", "SERVICE_NAME", "timeoutSeconds"]);
     expect(tool.inputSchema.properties.timeoutSeconds.description).toContain("Defaults to 30");
   });

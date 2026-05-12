@@ -5,13 +5,14 @@ import type { AppData } from "../../src/lib/types";
 describe("createMcpRegistry", () => {
   it("routes execution to the provided adapter", async () => {
     const appData: AppData = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       activeTabId: "workspace_1",
       globalScripts: [
         {
           id: "script_1",
           name: "Check Logs",
           description: "Check service logs",
+          fileName: "Check Logs.sh",
           content: "journalctl -u ${SERVICE}",
           createdAt: "2026-01-01T00:00:00.000Z",
           updatedAt: "2026-01-01T00:00:00.000Z"
@@ -34,6 +35,7 @@ describe("createMcpRegistry", () => {
               id: "attached_1",
               globalScriptId: "script_1",
               tag: "default",
+              description: "Read nginx logs in production",
               parameterSettings: {},
               useInMcp: true
             }
@@ -51,6 +53,7 @@ describe("createMcpRegistry", () => {
     }));
 
     expect(registry[0].name).toBe("prod_check_logs_default");
+    expect(registry[0].description).toContain("Read nginx logs in production");
     await expect(registry[0].execute({ SERVICE: "nginx" })).resolves.toMatchObject({
       stdout: "workspace_1:attached_1:nginx"
     });

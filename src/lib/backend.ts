@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { createDefaultAppData, normalizeAppData } from "./appData";
-import type { AppData, ConnectionSaveRequest, ExecutionRequest, ExecutionStart, ScriptExecutionEvent } from "./types";
+import type { AppData, ConnectionSaveRequest, ExecutionRequest, ExecutionStart, GlobalScript, ScriptExecutionEvent } from "./types";
 
 const LOCAL_STORAGE_KEY = "infrasteward.appData";
 
@@ -31,6 +31,42 @@ export async function saveAppData(appData: AppData): Promise<void> {
     return;
   }
   localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(appData));
+}
+
+export async function saveGlobalScript(script: GlobalScript): Promise<AppData> {
+  if (isTauriRuntime()) {
+    return normalizeAppData(await invoke("save_global_script", { script }));
+  }
+  const data = await loadAppData();
+  const nextData = {
+    ...data,
+    globalScripts: data.globalScripts.some((candidate) => candidate.id === script.id)
+      ? data.globalScripts.map((candidate) => (candidate.id === script.id ? script : candidate))
+      : [...data.globalScripts, script]
+  };
+  await saveAppData(nextData);
+  return nextData;
+}
+
+export async function deleteGlobalScript(scriptId: string): Promise<AppData> {
+  if (isTauriRuntime()) {
+    return normalizeAppData(await invoke("delete_global_script", { scriptId }));
+  }
+  const data = await loadAppData();
+  const nextData = {
+    ...data,
+    globalScripts: data.globalScripts.filter((script) => script.id !== scriptId)
+  };
+  await saveAppData(nextData);
+  return nextData;
+}
+
+export async function readGlobalScriptContent(scriptId: string): Promise<string> {
+  if (isTauriRuntime()) {
+    return invoke("read_global_script_content", { scriptId });
+  }
+  const data = await loadAppData();
+  return data.globalScripts.find((script) => script.id === scriptId)?.content ?? "";
 }
 
 export async function saveConnection(request: ConnectionSaveRequest): Promise<AppData> {
@@ -97,6 +133,7 @@ export async function logSystemEvent(event: {
 export type RuntimeInfo = {
   workingDataDir: string;
   systemLogPath: string;
+  scriptsDir: string;
 };
 
 export async function getRuntimeInfo(): Promise<RuntimeInfo> {
@@ -106,7 +143,8 @@ export async function getRuntimeInfo(): Promise<RuntimeInfo> {
 
   return {
     workingDataDir: "Browser localStorage preview",
-    systemLogPath: "Browser console"
+    systemLogPath: "Browser console",
+    scriptsDir: "Browser localStorage preview"
   };
 }
 

@@ -1,7 +1,7 @@
 import { createId, nowIso } from "./ids";
 import type { AppData, GlobalScript, SshConnectionConfig, WorkspaceTab } from "./types";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 export const MAX_LOGS_PER_WORKSPACE = 500;
 export const DEFAULT_SCRIPT_TAG = "default";
 
@@ -30,10 +30,12 @@ export function createWorkspace(title = "New Workspace"): WorkspaceTab {
 
 export function createGlobalScript(fields?: Partial<GlobalScript>): GlobalScript {
   const timestamp = nowIso();
+  const name = fields?.name ?? "New Script";
   return {
     id: createId("script"),
-    name: fields?.name ?? "New Script",
+    name,
     description: fields?.description ?? "",
+    fileName: fields?.fileName ?? scriptFileName(name),
     content: fields?.content ?? "",
     createdAt: fields?.createdAt ?? timestamp,
     updatedAt: fields?.updatedAt ?? timestamp
@@ -45,13 +47,7 @@ export function createDefaultAppData(): AppData {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     activeTabId: workspace.id,
-    globalScripts: [
-      createGlobalScript({
-        name: "Check Disk Usage",
-        description: "Show disk usage for the configured path.",
-        content: "df -h \"${TARGET_PATH:-/}\""
-      })
-    ],
+    globalScripts: [],
     workspaces: [workspace]
   };
 }
@@ -66,12 +62,20 @@ export function normalizeAppData(input: unknown): AppData {
   const normalized: AppData = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     activeTabId: typeof input.activeTabId === "string" ? input.activeTabId : "",
-    globalScripts: globalScripts.filter(isGlobalScript),
+    globalScripts: globalScripts
+      .filter(isGlobalScript)
+      .map((script) => ({
+        ...script,
+        fileName: script.fileName.trim(),
+        content: script.content ?? ""
+      }))
+      .filter((script) => script.fileName),
     workspaces: workspaces.filter(isWorkspace).map((workspace) => ({
       ...workspace,
       attachedScripts: workspace.attachedScripts.map((attached) => ({
         ...attached,
-        tag: normalizeScriptTag(attached.tag)
+        tag: normalizeScriptTag(attached.tag),
+        description: typeof attached.description === "string" ? attached.description : ""
       })),
       logs: workspace.logs.slice(-MAX_LOGS_PER_WORKSPACE)
     }))
@@ -102,13 +106,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function scriptFileName(scriptName: string) {
+  return `${scriptName.trim() || "New Script"}.sh`;
+}
+
 function isGlobalScript(value: unknown): value is GlobalScript {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
     typeof value.name === "string" &&
     typeof value.description === "string" &&
-    typeof value.content === "string" &&
+    typeof value.fileName === "string" &&
+    (typeof value.content === "string" || value.content === undefined) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string"
   );

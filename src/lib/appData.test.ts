@@ -27,19 +27,43 @@ describe("normalizeAppData", () => {
     expect(normalizeAppData(data).workspaces[0].logs).toHaveLength(500);
   });
 
-  it("adds default tags to legacy attachments", () => {
+  it("normalizes empty attachment tags", () => {
     const data = createDefaultAppData();
-    data.globalScripts[0].id = "script_1";
+    data.globalScripts.push({
+      id: "script_1",
+      name: "Deploy",
+      description: "",
+      fileName: "Deploy.sh",
+      content: "",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
     data.workspaces[0].attachedScripts = [
       {
         id: "attached_1",
         globalScriptId: "script_1",
         tag: "",
+        description: "",
         parameterSettings: {},
         useInMcp: false
       }
     ];
 
     expect(normalizeAppData(data).workspaces[0].attachedScripts[0].tag).toBe("default");
+  });
+
+  it("defaults missing attachment descriptions", () => {
+    const data = createDefaultAppData();
+    data.workspaces[0].attachedScripts = [
+      {
+        id: "attached_1",
+        globalScriptId: "script_1",
+        tag: "default",
+        parameterSettings: {},
+        useInMcp: false
+      } as (typeof data.workspaces)[number]["attachedScripts"][number]
+    ];
+
+    expect(normalizeAppData(data).workspaces[0].attachedScripts[0].description).toBe("");
   });
 });

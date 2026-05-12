@@ -12,6 +12,9 @@ import {
   saveAppData,
   loadAppData,
   runScript,
+  saveGlobalScript,
+  deleteGlobalScript,
+  readGlobalScriptContent,
   saveConnection,
   testConnection,
   logSystemEvent,
@@ -158,6 +161,7 @@ async function copyTextToClipboard(text: string) {
 
 function MainApp() {
   const [data, setData] = useState<AppData>(createDefaultAppData);
+  const [dataLoaded, setDataLoaded] = useState(false);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [error, setError] = useState("");
   const [runningExecution, setRunningExecution] = useState<RunningExecution | null>(null);
@@ -174,8 +178,10 @@ function MainApp() {
   const [mcpServerBusy, setMcpServerBusy] = useState(false);
   const [runtimePath, setRuntimePath] = useState("");
   const [systemLogPath, setSystemLogPath] = useState("");
+  const [scriptsDir, setScriptsDir] = useState("");
   const mainPaneRef = useRef<HTMLElement | null>(null);
   const logsListRef = useRef<HTMLDivElement | null>(null);
+  const selectedMcpCheckboxRef = useRef<globalThis.HTMLInputElement | null>(null);
   const streamBuffersRef = useRef<Record<string, string>>({});
   const scriptDragRef = useRef<{ attachedId: string; pointerId: number } | null>(null);
 
@@ -184,6 +190,7 @@ function MainApp() {
       .then((info) => {
         setRuntimePath(info.workingDataDir);
         setSystemLogPath(info.systemLogPath);
+        setScriptsDir(info.scriptsDir);
       })
       .catch((reason) => {
         const message = String(reason);
@@ -191,10 +198,14 @@ function MainApp() {
         void logSystemEvent({ level: "error", target: "frontend", message: "Failed to read runtime info.", details: message });
       });
     loadAppData()
-      .then(setData)
+      .then((loadedData) => {
+        setData(loadedData);
+        setDataLoaded(true);
+      })
       .catch((reason) => {
         const message = String(reason);
         setError(message);
+        setDataLoaded(true);
         void logSystemEvent({ level: "error", target: "frontend", message: "Failed to load app data.", details: message });
       });
   }, []);
@@ -210,12 +221,15 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
+    if (!dataLoaded) {
+      return;
+    }
     saveAppData(data).catch((reason) => {
       const message = String(reason);
       setError(`Storage error: ${message}`);
       void logSystemEvent({ level: "error", target: "frontend", message: "Failed to save app data.", details: message });
     });
-  }, [data]);
+  }, [data, dataLoaded]);
 
   useEffect(() => {
     if (!runningExecution) {
@@ -283,6 +297,14 @@ function MainApp() {
     : "No host configured";
   const visibleLogs = useMemo(() => filterLogsByLevel(activeWorkspace?.logs ?? [], logLevelFilter), [activeWorkspace?.logs, logLevelFilter]);
   const latestLogId = activeWorkspace?.logs.at(-1)?.id;
+  const selectedAttachedScripts = useMemo(
+    () => activeWorkspace?.attachedScripts.filter((attached) => attached.selected) ?? [],
+    [activeWorkspace?.attachedScripts]
+  );
+  const selectedScriptsUseInMcp =
+    selectedAttachedScripts.length > 0 && selectedAttachedScripts.every((attached) => attached.useInMcp);
+  const selectedScriptsMcpMixed =
+    selectedAttachedScripts.some((attached) => attached.useInMcp) && selectedAttachedScripts.some((attached) => !attached.useInMcp);
 
   useEffect(() => {
     if (!logsAutoscroll) {
@@ -297,6 +319,12 @@ function MainApp() {
     });
     return () => window.cancelAnimationFrame(frameId);
   }, [activeWorkspace?.id, latestLogId, logsAutoscroll]);
+
+  useEffect(() => {
+    if (selectedMcpCheckboxRef.current) {
+      selectedMcpCheckboxRef.current.indeterminate = selectedScriptsMcpMixed;
+    }
+  }, [selectedScriptsMcpMixed]);
 
   const attachmentCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -332,6 +360,27 @@ function MainApp() {
       attachedScripts.splice(Math.max(0, Math.min(insertIndex, attachedScripts.length)), 0, moved);
       return { ...workspace, attachedScripts };
     });
+  }
+
+  function toggleSelectedScriptsMcp(nextUseInMcp: boolean) {
+    const selectedIds = activeWorkspace.attachedScripts.filter((attached) => attached.selected).map((attached) => attached.id);
+    if (selectedIds.length === 0) {
+      return;
+    }
+    if (
+      nextUseInMcp &&
+      !confirm("Use in MCP allows an LLM client to execute selected scripts on the configured SSH server. Enable only for scripts you trust.")
+    ) {
+      return;
+    }
+
+    const selectedIdSet = new Set(selectedIds);
+    updateActiveWorkspace((workspace) => ({
+      ...workspace,
+      attachedScripts: workspace.attachedScripts.map((attached) =>
+        selectedIdSet.has(attached.id) ? { ...attached, useInMcp: nextUseInMcp } : attached
+      )
+    }));
   }
 
   function getScriptRowAtPoint(clientX: number, clientY: number) {
@@ -499,6 +548,36 @@ function MainApp() {
       void logSystemEvent({ level: "error", target: "frontend", message: "Failed to toggle MCP server.", details: message });
     } finally {
       setMcpServerBusy(false);
+    }
+  }
+
+  async function persistGlobalScript(script: GlobalScript) {
+    setBusy(true);
+    try {
+      const nextData = await saveGlobalScript(script);
+      setData(nextData);
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to save script.", details: message });
+      throw reason;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeGlobalScript(scriptId: string) {
+    setBusy(true);
+    try {
+      const nextData = await deleteGlobalScript(scriptId);
+      setData(nextData);
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      void logSystemEvent({ level: "error", target: "frontend", message: "Failed to delete script.", details: message });
+      throw reason;
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -801,7 +880,7 @@ function MainApp() {
             <button
               type="button"
               className="runtimePath"
-              title={`Open working directory\n${runtimePath}\nSystem log: ${systemLogPath}`}
+              title={`Open working directory\n${runtimePath}\nScripts: ${scriptsDir}\nSystem log: ${systemLogPath}`}
               onClick={openRuntimePath}
             >
               <span>Working directory</span>
@@ -859,9 +938,13 @@ function MainApp() {
                   </label>
                   <div className="scriptSummary">
                     <strong>{scriptDisplayName(script, attached)}</strong>
-                    {attached.useInMcp && <small>Use in MCP enabled</small>}
                   </div>
                   <div className="rowActions">
+                    {attached.useInMcp && (
+                      <span className="mcpBadge" title="Use in MCP enabled">
+                        MCP
+                      </span>
+                    )}
                     <button
                       type="button"
                       title="Script settings"
@@ -922,6 +1005,19 @@ function MainApp() {
             >
               <Play size={17} /> Play
             </button>
+            <label
+              className={`mcpSelectionToggle ${selectedAttachedScripts.length === 0 ? "disabled" : ""}`}
+              title={selectedAttachedScripts.length === 0 ? "Select scripts to change MCP access" : "Toggle MCP access for selected scripts"}
+            >
+              <input
+                ref={selectedMcpCheckboxRef}
+                type="checkbox"
+                checked={selectedScriptsUseInMcp}
+                disabled={selectedAttachedScripts.length === 0}
+                onChange={(event) => toggleSelectedScriptsMcp(event.target.checked)}
+              />
+              <span>MCP</span>
+            </label>
             <button type="button" onClick={() => setModal({ kind: "addScripts" })} title="Add" aria-label="Add scripts">
               <Plus size={17} /> Add
             </button>
@@ -1047,20 +1143,9 @@ function MainApp() {
           <ScriptManager
             scripts={data.globalScripts}
             attachmentCounts={attachmentCounts}
-            onDelete={(scriptId) =>
-              setData((current) => ({
-                ...current,
-                globalScripts: current.globalScripts.filter((script) => script.id !== scriptId)
-              }))
-            }
-            onSave={(script) =>
-              setData((current) => ({
-                ...current,
-                globalScripts: current.globalScripts.some((candidate) => candidate.id === script.id)
-                  ? current.globalScripts.map((candidate) => (candidate.id === script.id ? script : candidate))
-                  : [...current.globalScripts, script]
-              }))
-            }
+            onReadContent={readGlobalScriptContent}
+            onDelete={removeGlobalScript}
+            onSave={persistGlobalScript}
           />
         </Modal>
       )}
@@ -1080,6 +1165,7 @@ function MainApp() {
                     id: createId("attached"),
                     globalScriptId: scriptId,
                     tag,
+                    description: "",
                     parameterSettings: {},
                     useInMcp: false
                   }
